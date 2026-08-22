@@ -1,0 +1,19 @@
+1
+00:00:02,000 --> 00:00:06,000
+This is English subtitle test - line 1
+
+2
+00:00:08,000 --> 00:00:12,000
+This is English subtitle test - line 2
+
+3
+00:00:14,000 --> 00:00:18,000
+This is English subtitle test - line 3
+
+4
+00:00:20,000 --> 00:00:24,000
+This is English subtitle test - line 4
+
+5
+00:00:26,000 --> 00:00:30,000
+This is English subtitle test - line 5

@@ -1,0 +1,7 @@
+media/*.mp4
+media/*.mkv
+media/*.webm
+media/*.mov
+receiver/
+__pycache__/
+*.pyc

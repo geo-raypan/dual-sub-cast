@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Dual Subtitle Style Preview</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; background: #222; color: #eee; }
+  .controls { max-width: 900px; margin: 0 auto 16px; display: flex; gap: 12px; flex-wrap: wrap; }
+  .controls label { display: flex; flex-direction: column; font-size: 12px; }
+  .controls select { padding: 6px; min-width: 200px; }
+
+  .stage {
+    position: relative;
+    max-width: 900px;
+    margin: 0 auto;
+    background: black;
+  }
+  video { width: 100%; display: block; }
+
+  /* 這一段跟 receiver/index.html 用的是同一份樣式，改這裡就能立刻看到效果 */
+  #sub1, #sub2 {
+    position: absolute;
+    left: 0; right: 0;
+    text-align: center;
+    color: white;
+    font-family: sans-serif;
+    text-shadow: 0 0 4px black, 0 0 4px black, 0 0 4px black;
+    pointer-events: none;
+    white-space: pre-line;
+    font-size: var(--sub-font-size, 4vh);
+  }
+  #sub1 { bottom: var(--sub1-bottom, 12vh); }
+  #sub2 { bottom: var(--sub2-bottom, 5vh); }
+
+  .tuner { max-width: 900px; margin: 16px auto 0; font-size: 13px; }
+  .tuner .row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .tuner .row span:first-child { width: 110px; flex-shrink: 0; }
+  .tuner .row span:last-child { width: 50px; text-align: right; font-variant-numeric: tabular-nums; }
+  .tuner input[type="range"] { flex: 1; }
+  .tuner textarea { width: 100%; margin-top: 8px; font-family: monospace; font-size: 12px; background: #111; color: #9f9; border: 1px solid #444; padding: 6px; }
+</style>
+</head>
+<body>
+  <a href="/sender.html" style="display:inline-block;font-size:13px;margin-bottom:8px;color:#9cf;">← Back to sender</a>
+  <div class="controls">
+    <label>Video file
+      <select id="video"></select>
+      <input type="file" id="videoFile" accept="video/*">
+    </label>
+    <label>Subtitle 1 (top)
+      <select id="sub1sel"><option value="">(none)</option></select>
+      <input type="file" id="sub1File" accept=".vtt,.srt">
+    </label>
+    <label>Subtitle 2 (bottom)
+      <select id="sub2sel"><option value="">(none)</option></select>
+      <input type="file" id="sub2File" accept=".vtt,.srt">
+    </label>
+  </div>
+  <div id="uploadStatus" style="max-width:900px;margin:0 auto 12px;font-size:12px;color:#9f9;"></div>
+
+  <div class="stage">
+    <video id="player" controls></video>
+    <div id="sub1"></div>
+    <div id="sub2"></div>
+  </div>
+
+  <div class="tuner">
+    <div class="row">
+      <span>Font size</span>
+      <input type="range" id="tuneFont" min="1" max="10" step="0.1" value="4">
+      <span id="tuneFontVal">4vh</span>
+    </div>
+    <div class="row">
+      <span>Subtitle 1 offset</span>
+      <input type="range" id="tuneSub1" min="0" max="40" step="0.5" value="12">
+      <span id="tuneSub1Val">12vh</span>
+    </div>
+    <div class="row">
+      <span>Subtitle 2 offset</span>
+      <input type="range" id="tuneSub2" min="0" max="40" step="0.5" value="5">
+      <span id="tuneSub2Val">5vh</span>
+    </div>
+    <textarea id="cssOut" rows="4" readonly></textarea>
+    <button id="applyBtn" style="margin-top:8px;padding:8px;width:100%;cursor:pointer;">Apply to Chromecast (write to receiver and push to GitHub Pages)</button>
+    <div id="applyStatus" style="margin-top:6px;color:#9f9;white-space:pre-wrap;"></div>
+  </div>
+
+<script>
+  let cues1 = [], cues2 = [];
+  const videoSel = document.getElementById("video");
+  const sub1Sel = document.getElementById("sub1sel");
+  const sub2Sel = document.getElementById("sub2sel");
+  const player = document.getElementById("player");
+  const el1 = document.getElementById("sub1");
+  const el2 = document.getElementById("sub2");
+
+  // 跟 receiver/index.html 完全一樣的解析邏輯，同時吃 VTT 跟 SRT
+  function parseVtt(text) {
+    const cues = [];
+    const blocks = text.replace(/\r/g, "").split(/\n\n+/);
+    const timeRe = /(\d{2}:)?(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{2}:)?(\d{2}):(\d{2})[.,](\d{3})/;
+    for (const block of blocks) {
+      const lines = block.split("\n").filter(l => l.trim() !== "" && l.trim() !== "WEBVTT");
+      const timeLineIdx = lines.findIndex(l => timeRe.test(l));
+      if (timeLineIdx === -1) continue;
+      const m = lines[timeLineIdx].match(timeRe);
+      const toSec = (h, mi, s, ms) => (h ? parseInt(h) * 3600 : 0) + parseInt(mi) * 60 + parseInt(s) + parseInt(ms) / 1000;
+      const start = toSec(m[1] ? m[1].replace(":", "") : null, m[2], m[3], m[4]);
+      const end = toSec(m[5] ? m[5].replace(":", "") : null, m[6], m[7], m[8]);
+      const text = lines.slice(timeLineIdx + 1).join("\n").replace(/<[^>]+>/g, "");
+      cues.push({ start, end, text });
+    }
+    return cues;
+  }
+
+  async function fetchCues(url) {
+    if (!url) return [];
+    const res = await fetch(url);
+    return parseVtt(await res.text());
+  }
+
+  function cueTextAt(cues, t) {
+    const hit = cues.find(c => t >= c.start && t <= c.end);
+    return hit ? hit.text : "";
+  }
+
+  async function loadFileList() {
+    const res = await fetch("/list.json");
+    const data = await res.json();
+    [videoSel, sub1Sel, sub2Sel].forEach(sel => {
+      while (sel.options.length > (sel === videoSel ? 0 : 1)) sel.remove(sel.options.length - 1);
+    });
+    data.files.forEach(name => {
+      const opt = () => { const o = document.createElement("option"); o.value = name; o.textContent = name; return o; };
+      if (/\.(mp4|mkv|webm|mov)$/i.test(name)) videoSel.appendChild(opt());
+      if (/\.(vtt|srt)$/i.test(name)) { sub1Sel.appendChild(opt()); sub2Sel.appendChild(opt()); }
+    });
+  }
+
+  const uploadStatus = document.getElementById("uploadStatus");
+  async function uploadFile(file) {
+    uploadStatus.textContent = `Uploading ${file.name}...`;
+    const res = await fetch("/upload?name=" + encodeURIComponent(file.name), { method: "POST", body: file });
+    const data = await res.json();
+    if (!data.ok) {
+      uploadStatus.style.color = "#f88";
+      uploadStatus.textContent = "Upload failed: " + data.error;
+      return null;
+    }
+    uploadStatus.style.color = "#9f9";
+    uploadStatus.textContent = `Uploaded ${data.name}`;
+    await loadFileList();
+    return data.name;
+  }
+
+  document.getElementById("videoFile").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const name = await uploadFile(file);
+    if (name) { videoSel.value = name; applySelection(); }
+  });
+  document.getElementById("sub1File").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const name = await uploadFile(file);
+    if (name) { sub1Sel.value = name; applySelection(); }
+  });
+  document.getElementById("sub2File").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const name = await uploadFile(file);
+    if (name) { sub2Sel.value = name; applySelection(); }
+  });
+
+  async function applySelection() {
+    if (videoSel.value) player.src = "/" + encodeURIComponent(videoSel.value);
+    cues1 = await fetchCues(sub1Sel.value ? "/" + encodeURIComponent(sub1Sel.value) : null);
+    cues2 = await fetchCues(sub2Sel.value ? "/" + encodeURIComponent(sub2Sel.value) : null);
+  }
+
+  videoSel.addEventListener("change", applySelection);
+  sub1Sel.addEventListener("change", applySelection);
+  sub2Sel.addEventListener("change", applySelection);
+
+  player.addEventListener("timeupdate", () => {
+    el1.textContent = cueTextAt(cues1, player.currentTime);
+    el2.textContent = cueTextAt(cues2, player.currentTime);
+  });
+
+  loadFileList();
+
+  const root = document.documentElement.style;
+  const tuneFont = document.getElementById("tuneFont");
+  const tuneSub1 = document.getElementById("tuneSub1");
+  const tuneSub2 = document.getElementById("tuneSub2");
+  const tuneFontVal = document.getElementById("tuneFontVal");
+  const tuneSub1Val = document.getElementById("tuneSub1Val");
+  const tuneSub2Val = document.getElementById("tuneSub2Val");
+  const cssOut = document.getElementById("cssOut");
+
+  function updateTuner() {
+    root.setProperty("--sub-font-size", tuneFont.value + "vh");
+    root.setProperty("--sub1-bottom", tuneSub1.value + "vh");
+    root.setProperty("--sub2-bottom", tuneSub2.value + "vh");
+    tuneFontVal.textContent = tuneFont.value + "vh";
+    tuneSub1Val.textContent = tuneSub1.value + "vh";
+    tuneSub2Val.textContent = tuneSub2.value + "vh";
+    cssOut.value =
+`font-size: ${tuneFont.value}vh;
+#sub1 { bottom: ${tuneSub1.value}vh; }
+#sub2 { bottom: ${tuneSub2.value}vh; }`;
+  }
+  [tuneFont, tuneSub1, tuneSub2].forEach(el => el.addEventListener("input", updateTuner));
+  updateTuner();
+
+  const applyBtn = document.getElementById("applyBtn");
+  const applyStatus = document.getElementById("applyStatus");
+  applyBtn.addEventListener("click", async () => {
+    applyBtn.disabled = true;
+    applyStatus.style.color = "#9f9";
+    applyStatus.textContent = "Applying: writing file and pushing...";
+    try {
+      const res = await fetch("/apply_style", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          font_size: parseFloat(tuneFont.value),
+          sub1_bottom: parseFloat(tuneSub1.value),
+          sub2_bottom: parseFloat(tuneSub2.value)
+        })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        applyStatus.style.color = "#9f9";
+        applyStatus.textContent = "Applied and pushed successfully! Once GitHub Pages updates (about 1-2 minutes), the next cast will use the new style.";
+      } else {
+        applyStatus.style.color = "#f88";
+        applyStatus.textContent = "Apply failed: " + data.error;
+      }
+    } catch (e) {
+      applyStatus.style.color = "#f88";
+      applyStatus.textContent = "Connection failed: " + e;
+    } finally {
+      applyBtn.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>

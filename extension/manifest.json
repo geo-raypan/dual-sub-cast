@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Dual Subtitle Cast Launcher",
+  "version": "0.1.0",
+  "description": "Open the local dual-subtitle Chromecast sender page.",
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "permissions": ["tabs", "storage"],
+  "icons": {}
+}

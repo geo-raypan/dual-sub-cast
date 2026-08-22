@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Dual Subtitle Chromecast Sender</title>
+<style>
+  body { font-family: sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; }
+  label { display: block; margin-top: 12px; font-weight: bold; }
+  select, button { width: 100%; padding: 8px; margin-top: 4px; font-size: 14px; }
+  input[type="file"] { width: 100%; margin-top: 4px; font-size: 12px; }
+  button { margin-top: 20px; cursor: pointer; }
+  #status, #uploadStatus { margin-top: 16px; color: #555; white-space: pre-wrap; }
+  google-cast-launcher { width: 32px; height: 32px; float: right; }
+  .nav-link { display: inline-block; font-size: 13px; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+  <a class="nav-link" href="/preview.html">→ Subtitle style preview / tuning</a>
+  <h2>Dual Subtitle Cast <google-cast-launcher id="castBtn"></google-cast-launcher></h2>
+
+  <label for="video">Video file</label>
+  <select id="video"></select>
+  <input type="file" id="videoFile" accept="video/*">
+
+  <label for="sub1">Subtitle 1 (e.g. Chinese, top)</label>
+  <select id="sub1"><option value="">(none)</option></select>
+  <input type="file" id="sub1File" accept=".vtt,.srt">
+
+  <label for="sub2">Subtitle 2 (e.g. English, bottom)</label>
+  <select id="sub2"><option value="">(none)</option></select>
+  <input type="file" id="sub2File" accept=".vtt,.srt">
+
+  <div id="uploadStatus"></div>
+
+  <button id="castOut">Cast to Chromecast</button>
+  <div id="status"></div>
+
+<script>
+  // Your custom dual-subtitle Receiver App ID registered in the Google Cast Developer Console
+  const RECEIVER_APP_ID = "775775DC";
+
+  const status = document.getElementById("status");
+  function log(msg) { status.textContent = msg; console.log(msg); }
+
+  // The sender page itself must be loaded from a secure context (https, or
+  // http://localhost) for the Cast SDK to initialize. But the media URLs we
+  // hand to the Chromecast device must point at this machine's LAN IP, since
+  // "localhost" on the Chromecast would mean itself, not this PC. So we ask
+  // the local server (which always knows its own LAN IP) for the right host
+  // to use for media URLs, independent of how this page was opened.
+  let mediaOrigin = window.location.origin;
+  async function resolveMediaOrigin() {
+    try {
+      const res = await fetch("/whoami");
+      const data = await res.json();
+      mediaOrigin = `http://${data.lan_ip}:${data.port}`;
+    } catch (e) {
+      log("Could not resolve the LAN address; falling back to the current origin. Chromecast may not be able to reach it.");
+    }
+  }
+  resolveMediaOrigin();
+
+  const videoSel = document.getElementById("video");
+  const sub1Sel = document.getElementById("sub1");
+  const sub2Sel = document.getElementById("sub2");
+  const uploadStatus = document.getElementById("uploadStatus");
+
+  async function loadFileList() {
+    const res = await fetch("/list.json");
+    const data = await res.json();
+    [videoSel, sub1Sel, sub2Sel].forEach(sel => {
+      while (sel.options.length > (sel === videoSel ? 0 : 1)) sel.remove(sel.options.length - 1);
+    });
+    data.files.forEach(name => {
+      const opt = () => { const o = document.createElement("option"); o.value = name; o.textContent = name; return o; };
+      if (/\.(mp4|mkv|webm|mov)$/i.test(name)) videoSel.appendChild(opt());
+      if (/\.(vtt|srt)$/i.test(name)) { sub1Sel.appendChild(opt()); sub2Sel.appendChild(opt()); }
+    });
+  }
+  loadFileList();
+
+  async function uploadFile(file) {
+    uploadStatus.style.color = "#555";
+    uploadStatus.textContent = `Uploading ${file.name}...`;
+    const res = await fetch("/upload?name=" + encodeURIComponent(file.name), { method: "POST", body: file });
+    const data = await res.json();
+    if (!data.ok) {
+      uploadStatus.style.color = "#c00";
+      uploadStatus.textContent = "Upload failed: " + data.error;
+      return null;
+    }
+    uploadStatus.style.color = "#080";
+    uploadStatus.textContent = `Uploaded ${data.name}`;
+    await loadFileList();
+    return data.name;
+  }
+
+  document.getElementById("videoFile").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const name = await uploadFile(file);
+    if (name) videoSel.value = name;
+  });
+  document.getElementById("sub1File").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const name = await uploadFile(file);
+    if (name) sub1Sel.value = name;
+  });
+  document.getElementById("sub2File").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const name = await uploadFile(file);
+    if (name) sub2Sel.value = name;
+  });
+
+  let castContext = null;
+
+  window['__onGCastApiAvailable'] = function(isAvailable) {
+    if (isAvailable) {
+      initCastApi();
+    } else {
+      log("Cast SDK reported unavailable (isAvailable=false). Make sure you're using desktop Chrome.");
+    }
+  };
+
+  // If the SDK callback never fires at all (script blocked, network issue, etc.)
+  setTimeout(() => {
+    if (!castContext) {
+      log("Cast SDK did not initialize within 5 seconds. Press F12 to open DevTools Console and check for red errors (common causes: can't reach www.gstatic.com, or not using Chrome).");
+    }
+  }, 5000);
+
+  function initCastApi() {
+    castContext = cast.framework.CastContext.getInstance();
+    castContext.setOptions({
+      receiverApplicationId: RECEIVER_APP_ID,
+      autoJoinPolicy: chrome.cast.AutoJoinPolicy.PAGE_SCOPED
+    });
+    log("Cast SDK ready. You can cast now.");
+  }
+
+  document.getElementById("castOut").addEventListener("click", () => {
+    if (!castContext) {
+      log("Cast SDK not initialized yet. Wait a moment or reload the page.");
+      return;
+    }
+    const videoName = videoSel.value;
+    const sub1Name = sub1Sel.value;
+    const sub2Name = sub2Sel.value;
+    if (!videoName) { log("Please select a video file first."); return; }
+
+    castContext.requestSession().then(() => {
+      const session = castContext.getCurrentSession();
+      const mediaInfo = new chrome.cast.media.MediaInfo(mediaOrigin + "/" + encodeURIComponent(videoName), guessMime(videoName));
+      mediaInfo.customData = {
+        sub1Url: sub1Name ? mediaOrigin + "/" + encodeURIComponent(sub1Name) : null,
+        sub2Url: sub2Name ? mediaOrigin + "/" + encodeURIComponent(sub2Name) : null
+      };
+      const request = new chrome.cast.media.LoadRequest(mediaInfo);
+      session.loadMedia(request).then(
+        () => log("Casting started: " + videoName),
+        (err) => log("Cast failed: " + JSON.stringify(err))
+      );
+    }, (err) => {
+      const detail = err && typeof err === "object"
+        ? JSON.stringify(err, Object.getOwnPropertyNames(err))
+        : JSON.stringify(err);
+      log("Could not connect to Chromecast: code=" + (err && err.code) + " description=" + (err && err.description) + " raw=" + detail);
+      console.error("requestSession rejected:", err);
+    });
+  });
+
+  function guessMime(name) {
+    if (/\.mp4$/i.test(name)) return "video/mp4";
+    if (/\.webm$/i.test(name)) return "video/webm";
+    if (/\.mkv$/i.test(name)) return "video/x-matroska";
+    return "video/mp4";
+  }
+</script>
+<script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
+</body>
+</html>
