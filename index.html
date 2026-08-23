@@ -41,6 +41,24 @@
     color: #fff; font-size: 11px; letter-spacing: 0; flex-shrink: 0;
   }
 
+  /* Style/sync sit side by side so scrolling to reach the sync sliders
+     doesn't scroll the preview (and its subtitle overlay) out of view; each
+     is also collapsible so either can be tucked away to shrink the page
+     further. Native <details>/<summary> gives collapse for free. */
+  .card-row { max-width: var(--max-w); margin: 0 auto 14px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .card-row > details.card { flex: 1 1 320px; margin: 0; max-width: none; }
+  details.card summary {
+    margin: 0 0 12px; font-size: 12px; font-weight: 600; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--ink-soft); display: flex; align-items: center; gap: 8px;
+    cursor: pointer; list-style: none;
+  }
+  details.card summary::-webkit-details-marker { display: none; }
+  details.card summary::after {
+    content: "▾"; margin-left: auto; color: var(--ink-faint); font-size: 11px; transition: transform .15s;
+  }
+  details.card:not([open]) summary { margin-bottom: 0; }
+  details.card:not([open]) summary::after { transform: rotate(-90deg); }
+
   .pickers { display: flex; gap: 12px; flex-wrap: wrap; }
   .picker { display: flex; flex-direction: column; font-size: 12px; gap: 5px; flex: 1 1 220px; color: var(--ink-soft); }
   .picker .btn-row { display: flex; gap: 4px; }
@@ -151,46 +169,48 @@
     <div class="hint">Plays locally in the browser, not on the Chromecast. Left/Right arrow keys seek ±5s (click the video first, not a slider).</div>
   </div>
 
-  <div class="card">
-    <h2><span class="num">3</span>Subtitle style</h2>
-    <div class="row">
-      <span>Font size</span>
-      <input type="range" id="tuneFont" min="1" max="10" step="0.1" value="4">
-      <span id="tuneFontVal">4vh</span>
-    </div>
-    <div class="row">
-      <span>Subtitle 1 position</span>
-      <input type="range" id="tuneSub1" min="0" max="40" step="0.5" value="12">
-      <span id="tuneSub1Val">12vh</span>
-    </div>
-    <div class="row">
-      <span>Subtitle 2 position</span>
-      <input type="range" id="tuneSub2" min="0" max="40" step="0.5" value="5">
-      <span id="tuneSub2Val">5vh</span>
-    </div>
-    <textarea id="cssOut" rows="4" readonly></textarea>
-    <button id="applyBtn" style="margin-top:10px;width:100%;">Apply style to Chromecast (write to receiver and push to GitHub Pages)</button>
-    <div id="applyStatus"></div>
-  </div>
+  <div class="card-row">
+    <details class="card" open>
+      <summary><span class="num">3</span>Subtitle style</summary>
+      <div class="row">
+        <span>Font size</span>
+        <input type="range" id="tuneFont" min="1" max="10" step="0.1" value="4">
+        <span id="tuneFontVal">4vh</span>
+      </div>
+      <div class="row">
+        <span>Subtitle 1 position</span>
+        <input type="range" id="tuneSub1" min="0" max="40" step="0.5" value="12">
+        <span id="tuneSub1Val">12vh</span>
+      </div>
+      <div class="row">
+        <span>Subtitle 2 position</span>
+        <input type="range" id="tuneSub2" min="0" max="40" step="0.5" value="5">
+        <span id="tuneSub2Val">5vh</span>
+      </div>
+      <textarea id="cssOut" rows="4" readonly></textarea>
+      <button id="applyBtn" style="margin-top:10px;width:100%;">Apply style to Chromecast (write to receiver and push to GitHub Pages)</button>
+      <div id="applyStatus"></div>
+    </details>
 
-  <div class="card">
-    <h2><span class="num">4</span>Subtitle sync</h2>
-    <div class="row">
-      <span>Sub 1 delay (s)</span>
-      <input type="range" id="delaySub1" min="-60" max="60" step="0.1" value="0">
-      <span id="delaySub1Val">0.0s</span>
-      <button class="mark" data-mark="sub1">Mark: line 1 is now</button>
-    </div>
-    <div class="row">
-      <span>Sub 2 delay (s)</span>
-      <input type="range" id="delaySub2" min="-60" max="60" step="0.1" value="0">
-      <span id="delaySub2Val">0.0s</span>
-      <button class="mark" data-mark="sub2">Mark: line 1 is now</button>
-    </div>
-    <div class="hint">
-      Rough sync: play the preview, pause exactly when the subtitle's first line is spoken, then click "Mark: line 1 is now" to compute the delay from that instant. Then fine-tune with the slider. Remembered per subtitle file -- picking the same file later restores it, and it's applied automatically when you cast.
-    </div>
-    <div id="adjustStatus"></div>
+    <details class="card" open>
+      <summary><span class="num">4</span>Subtitle sync</summary>
+      <div class="row">
+        <span>Sub 1 delay (s)</span>
+        <input type="range" id="delaySub1" min="-60" max="60" step="0.1" value="0">
+        <span id="delaySub1Val">0.0s</span>
+        <button class="mark" data-mark="sub1">Mark: line 1 is now</button>
+      </div>
+      <div class="row">
+        <span>Sub 2 delay (s)</span>
+        <input type="range" id="delaySub2" min="-60" max="60" step="0.1" value="0">
+        <span id="delaySub2Val">0.0s</span>
+        <button class="mark" data-mark="sub2">Mark: line 1 is now</button>
+      </div>
+      <div class="hint">
+        Rough sync: play the preview, pause exactly when the subtitle's first line is spoken, then click "Mark: line 1 is now" to compute the delay from that instant. Then fine-tune with the slider. Remembered per subtitle file -- picking the same file later restores it, and it's applied automatically when you cast.
+      </div>
+      <div id="adjustStatus"></div>
+    </details>
   </div>
 
   <button id="castOut" class="primary">Cast to Chromecast</button>
