@@ -214,8 +214,11 @@ class RangeRequestHandler(http.server.SimpleHTTPRequestHandler):
             self.send_json(500, {"ok": False, "error": str(e)})
             return
 
-        if filename.lower().endswith(VIDEO_EXTENSIONS):
-            threading.Thread(target=transcode_if_needed, args=(filename,), daemon=True).start()
+        # Temporarily disabled: this Chromecast turned out to play HEVC/4K fine
+        # directly (see project memory), so auto-transcoding on upload was
+        # doing unnecessary work. Re-enable if a file actually fails to play.
+        # if filename.lower().endswith(VIDEO_EXTENSIONS):
+        #     threading.Thread(target=transcode_if_needed, args=(filename,), daemon=True).start()
         self.send_json(200, {"ok": True, "name": filename})
 
     def handle_apply_style(self):
