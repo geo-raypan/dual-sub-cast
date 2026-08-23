@@ -10,14 +10,17 @@ Chrome extension popup to build the picker.
 Run this on the same machine as Chrome. It binds to 0.0.0.0 so the Chromecast
 device on your LAN can fetch the files directly.
 """
+import glob
 import http.server
 import json
 import mimetypes
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
+import threading
 import urllib.parse
 
 MEDIA_DIR = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "media")
@@ -28,6 +31,121 @@ RECEIVER_DIR = os.path.join(APP_DIR, "receiver")
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
 RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
+
+# Codecs Chrome's <video> tag (and the CAF cast-media-player) can't play.
+# Anything in here, or any video taller than 1080p, gets auto-transcoded on upload.
+INCOMPATIBLE_VIDEO_CODECS = {"hevc", "h265", "av1", "mpeg2video", "mpeg4", "wmv3", "vc1"}
+VIDEO_EXTENSIONS = (".mp4", ".mkv", ".webm", ".mov", ".avi", ".wmv")
+
+# name -> {"status": "checking"|"transcoding"|"done"|"error", "output": str|None, "error": str|None}
+TRANSCODE_STATUS = {}
+TRANSCODE_LOCK = threading.Lock()
+
+
+def find_tool(name):
+    found = shutil.which(name)
+    if found:
+        return found
+    # Common manual-install locations on Windows when it's not on PATH.
+    for pattern in (
+        rf"C:\ffmpeg\**\{name}.exe",
+        rf"C:\Program Files\ffmpeg\**\{name}.exe",
+        rf"C:\Program Files (x86)\ffmpeg\**\{name}.exe",
+    ):
+        matches = glob.glob(pattern, recursive=True)
+        if matches:
+            return matches[0]
+    return None
+
+
+FFMPEG_PATH = find_tool("ffmpeg")
+FFPROBE_PATH = find_tool("ffprobe")
+
+
+def probe_video(path):
+    """Return (codec_name, height) for the first video stream, or (None, None) if ffprobe is unavailable/fails."""
+    if not FFPROBE_PATH:
+        return None, None
+    try:
+        out = subprocess.run(
+            [FFPROBE_PATH, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name,height", "-of", "json", path],
+            capture_output=True, text=True, timeout=30
+        )
+        data = json.loads(out.stdout or "{}")
+        stream = (data.get("streams") or [{}])[0]
+        return stream.get("codec_name"), stream.get("height")
+    except (subprocess.SubprocessError, json.JSONDecodeError, IndexError, OSError):
+        return None, None
+
+
+def run_ffmpeg(args, partial_output, final_output):
+    subprocess.run([FFMPEG_PATH, "-y"] + args + [partial_output], capture_output=True, text=True, check=True)
+    os.replace(partial_output, final_output)
+
+
+def transcode_if_needed(name):
+    with TRANSCODE_LOCK:
+        TRANSCODE_STATUS[name] = {"status": "checking", "output": None, "error": None}
+
+    path = os.path.join(MEDIA_DIR, name)
+    codec, height = probe_video(path)
+    needs_transcode = codec in INCOMPATIBLE_VIDEO_CODECS or (isinstance(height, int) and height > 1080)
+    ext = os.path.splitext(name)[1].lower()
+    stem = os.path.splitext(name)[0]
+
+    if not needs_transcode:
+        # Codec/resolution are already fine. But MP4/MOV files muxed with the
+        # index (moov atom) at the end of the file -- common in scene-release
+        # remuxes -- will play a few seconds then stall for progressive HTTP
+        # streaming. A lossless remux with faststart fixes this without
+        # re-encoding, so do it as a fast, cheap safety pass for those.
+        if ext in (".mp4", ".mov") and FFMPEG_PATH:
+            with TRANSCODE_LOCK:
+                TRANSCODE_STATUS[name] = {"status": "transcoding", "output": None, "error": None}
+            final_output = os.path.join(MEDIA_DIR, f"{stem}.faststart.mp4")
+            partial_output = final_output + ".part"
+            try:
+                run_ffmpeg(["-i", path, "-c", "copy", "-movflags", "+faststart"], partial_output, final_output)
+                with TRANSCODE_LOCK:
+                    TRANSCODE_STATUS[name] = {"status": "done", "output": os.path.basename(final_output), "error": None}
+            except subprocess.CalledProcessError as e:
+                if os.path.exists(partial_output):
+                    os.remove(partial_output)
+                # Faststart remux failing isn't fatal -- fall back to the original file as-is.
+                with TRANSCODE_LOCK:
+                    TRANSCODE_STATUS[name] = {"status": "done", "output": name, "error": None}
+        else:
+            with TRANSCODE_LOCK:
+                TRANSCODE_STATUS[name] = {"status": "done", "output": name, "error": None}
+        return
+
+    if not FFMPEG_PATH:
+        with TRANSCODE_LOCK:
+            TRANSCODE_STATUS[name] = {
+                "status": "error", "output": None,
+                "error": f"'{name}' needs transcoding (codec={codec}, height={height}) but ffmpeg wasn't found on PATH or in C:\\ffmpeg."
+            }
+        return
+
+    with TRANSCODE_LOCK:
+        TRANSCODE_STATUS[name] = {"status": "transcoding", "output": None, "error": None}
+
+    final_output = os.path.join(MEDIA_DIR, f"{stem}.1080p.mp4")
+    partial_output = final_output + ".part"
+    try:
+        run_ffmpeg(
+            ["-i", path, "-vf", "scale=-2:min(1080\\,ih)",
+             "-c:v", "libx264", "-crf", "20", "-preset", "veryfast", "-c:a", "copy", "-movflags", "+faststart"],
+            partial_output, final_output
+        )
+        with TRANSCODE_LOCK:
+            TRANSCODE_STATUS[name] = {"status": "done", "output": os.path.basename(final_output), "error": None}
+    except subprocess.CalledProcessError as e:
+        if os.path.exists(partial_output):
+            os.remove(partial_output)
+        with TRANSCODE_LOCK:
+            TRANSCODE_STATUS[name] = {"status": "error", "output": None, "error": e.stderr[-500:] if e.stderr else str(e)}
 
 
 class RangeRequestHandler(http.server.SimpleHTTPRequestHandler):
@@ -46,6 +164,9 @@ class RangeRequestHandler(http.server.SimpleHTTPRequestHandler):
             return
         if parsed.path == "/whoami":
             self.send_whoami()
+            return
+        if parsed.path == "/transcode_status":
+            self.send_transcode_status(parsed)
             return
         if parsed.path in ("/", "/sender.html"):
             self.serve_app_file("sender.html")
@@ -93,6 +214,8 @@ class RangeRequestHandler(http.server.SimpleHTTPRequestHandler):
             self.send_json(500, {"ok": False, "error": str(e)})
             return
 
+        if filename.lower().endswith(VIDEO_EXTENSIONS):
+            threading.Thread(target=transcode_if_needed, args=(filename,), daemon=True).start()
         self.send_json(200, {"ok": True, "name": filename})
 
     def handle_apply_style(self):
@@ -154,6 +277,13 @@ class RangeRequestHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def send_transcode_status(self, parsed):
+        query = urllib.parse.parse_qs(parsed.query)
+        name = (query.get("name") or [""])[0]
+        with TRANSCODE_LOCK:
+            status = TRANSCODE_STATUS.get(name, {"status": "unknown", "output": None, "error": None})
+        self.send_json(200, status)
+
     def send_whoami(self):
         body = json.dumps({"lan_ip": lan_ip(), "port": PORT}).encode("utf-8")
         self.send_response(200)
@@ -165,7 +295,7 @@ class RangeRequestHandler(http.server.SimpleHTTPRequestHandler):
     def send_list_json(self):
         files = sorted(
             f for f in os.listdir(MEDIA_DIR)
-            if os.path.isfile(os.path.join(MEDIA_DIR, f))
+            if os.path.isfile(os.path.join(MEDIA_DIR, f)) and not f.endswith(".part")
         )
         body = json.dumps({"files": files}).encode("utf-8")
         self.send_response(200)

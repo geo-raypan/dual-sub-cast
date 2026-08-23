@@ -99,11 +99,38 @@
     return data.name;
   }
 
+  async function pollTranscodeStatus(name) {
+    while (true) {
+      const res = await fetch("/transcode_status?name=" + encodeURIComponent(name));
+      const data = await res.json();
+      if (data.status === "checking") {
+        uploadStatus.textContent = `Checking ${name} for compatibility...`;
+      } else if (data.status === "transcoding") {
+        uploadStatus.textContent = `${name} needs conversion for this Chromecast -- converting in the background, this may take a while...`;
+      } else if (data.status === "done") {
+        uploadStatus.style.color = "#080";
+        uploadStatus.textContent = data.output === name ? `${name} is ready.` : `${name} converted -> ${data.output}`;
+        await loadFileList();
+        return data.output;
+      } else if (data.status === "error") {
+        uploadStatus.style.color = "#c00";
+        uploadStatus.textContent = `Conversion failed for ${name}: ${data.error}`;
+        return name; // fall back to the original file
+      } else {
+        return name;
+      }
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+
   document.getElementById("videoFile").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     const name = await uploadFile(file);
-    if (name) videoSel.value = name;
+    if (!name) return;
+    videoSel.value = name;
+    const finalName = await pollTranscodeStatus(name);
+    videoSel.value = finalName;
   });
   document.getElementById("sub1File").addEventListener("change", async (e) => {
     const file = e.target.files[0];
