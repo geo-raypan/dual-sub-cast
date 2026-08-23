@@ -34,6 +34,10 @@
 
   <button id="castOut">Cast to Chromecast</button>
   <div id="status"></div>
+  <p style="font-size:12px;color:#777;margin-top:16px;">
+    While casting: <b>PageUp/PageDown</b> shifts both subtitles' timing.
+    Hold <b>Shift</b> for subtitle 1 only, <b>Ctrl</b> for subtitle 2 only.
+  </p>
 
 <script>
   // Your custom dual-subtitle Receiver App ID registered in the Google Cast Developer Console
@@ -169,6 +173,27 @@
       log("Could not connect to Chromecast: code=" + (err && err.code) + " description=" + (err && err.description) + " raw=" + detail);
       console.error("requestSession rejected:", err);
     });
+  });
+
+  // Live subtitle-delay tuning while casting: PageUp/PageDown shifts both
+  // subtitles together; hold Shift for subtitle 1 only, Ctrl for subtitle 2 only.
+  const CONTROL_NAMESPACE = "urn:x-cast:com.dualsubcast.control";
+  const OFFSET_STEP = 0.5; // seconds per key press
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "PageUp" && e.key !== "PageDown") return;
+    if (!castContext) return;
+    const session = castContext.getCurrentSession();
+    if (!session) return;
+
+    e.preventDefault();
+    const delta = e.key === "PageDown" ? OFFSET_STEP : -OFFSET_STEP;
+    const target = e.shiftKey ? "sub1" : e.ctrlKey ? "sub2" : "both";
+
+    session.sendMessage(CONTROL_NAMESPACE, { target, delta }).then(
+      () => log(`Adjusted ${target} by ${delta > 0 ? "+" : ""}${delta}s`),
+      (err) => log("Failed to send offset adjustment: " + JSON.stringify(err))
+    );
   });
 
   function guessMime(name) {
