@@ -138,6 +138,7 @@
           <button class="pick" data-kind="video">📁 Choose Video...</button>
         </div>
         <span class="name" id="pickedVideo">(none)</span>
+        <span class="hint" id="resumeInfo" style="margin:0;"></span>
       </div>
       <div class="picker">
         Subtitle 1 (top, optional)
@@ -340,6 +341,44 @@
     pickedEls[kind].classList.toggle("set", !!isSet);
   }
 
+  // Remembers where a video was last stopped (per absolute path) so a long
+  // movie watched over several sittings resumes instead of restarting at 0:00.
+  function formatTime(sec) {
+    sec = Math.max(0, Math.round(sec));
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s).padStart(2, "0");
+  }
+
+  async function getPlaybackPosition(path) {
+    if (!path) return 0;
+    const res = await fetch("/playback_position?path=" + encodeURIComponent(path));
+    return (await res.json()).position || 0;
+  }
+
+  function savePlaybackPosition(path, position) {
+    if (!path) return;
+    fetch("/playback_position", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, position })
+    });
+  }
+
+  const resumeInfo = document.getElementById("resumeInfo");
+  async function refreshResumeInfo() {
+    const pos = await getPlaybackPosition(pickedPaths.video);
+    if (pos > 3) {
+      resumeInfo.innerHTML = `Resumes at ${formatTime(pos)} -- <a href="#" id="resetResume" style="color:var(--accent);">start over</a>`;
+      document.getElementById("resetResume").addEventListener("click", (e) => {
+        e.preventDefault();
+        savePlaybackPosition(pickedPaths.video, 0);
+        refreshResumeInfo();
+      });
+    } else {
+      resumeInfo.textContent = "";
+    }
+  }
+
   async function loadSelection() {
     const res = await fetch("/selection");
     const data = await res.json();
@@ -349,6 +388,7 @@
       setPickedLabel(kind, pickedNames[kind] || "(none)", !!pickedNames[kind]);
     }
     await loadSubAdjustments();
+    await refreshResumeInfo();
     applySelection();
   }
 
@@ -363,6 +403,7 @@
         pickedNames[kind] = data.name;
         setPickedLabel(kind, data.name, true);
         if (kind === "sub1" || kind === "sub2") await loadSubAdjustments();
+        if (kind === "video") await refreshResumeInfo();
         applySelection();
       } else {
         setPickedLabel(kind, pickedNames[kind] || "(none)", !!pickedNames[kind]);
@@ -378,6 +419,7 @@
       pickedNames[kind] = null;
       setPickedLabel(kind, "(none)", false);
       await loadSubAdjustments();
+      if (kind === "video") await refreshResumeInfo();
       applySelection();
     });
   });
@@ -547,8 +589,10 @@
     }
     if (!pickedNames.video) { log("Please choose a video file first."); return; }
 
-    castContext.requestSession().then(() => {
+    castContext.requestSession().then(async () => {
       const session = castContext.getCurrentSession();
+      const videoPath = pickedPaths.video;
+      const resumeAt = await getPlaybackPosition(videoPath);
       const mediaInfo = new chrome.cast.media.MediaInfo(mediaOrigin + "/play?which=video", guessMime(pickedNames.video));
       mediaInfo.customData = {
         sub1Url: pickedNames.sub1 ? mediaOrigin + "/play?which=sub1" : null,
@@ -560,8 +604,12 @@
         sub2Bottom: style.sub2_bottom
       };
       const request = new chrome.cast.media.LoadRequest(mediaInfo);
+      if (resumeAt > 3) request.currentTime = resumeAt;
       session.loadMedia(request).then(
-        () => log("Casting started: " + pickedNames.video),
+        () => {
+          log("Casting started: " + pickedNames.video + (resumeAt > 3 ? ` (resuming at ${formatTime(resumeAt)})` : ""));
+          trackPlaybackProgress(session, videoPath);
+        },
         (err) => log("Cast failed: " + JSON.stringify(err))
       );
     }, (err) => {
@@ -572,6 +620,31 @@
       console.error("requestSession rejected:", err);
     });
   });
+
+  // Saves playback progress periodically while casting so a long movie can be
+  // resumed later. Rides the SDK's own status-update events (fired on state
+  // changes and roughly once a second during playback) rather than a separate
+  // polling timer, and clears the saved position once the video finishes so a
+  // rewatch starts from 0:00 instead of right before the credits.
+  function trackPlaybackProgress(session, videoPath) {
+    const media = session.getMediaSession();
+    if (!media || !videoPath) return;
+    let lastSaved = -Infinity;
+    media.addUpdateListener(function onUpdate(isAlive) {
+      if (!isAlive) return;
+      if (media.playerState === chrome.cast.media.PlayerState.IDLE &&
+          media.idleReason === chrome.cast.media.IdleReason.FINISHED) {
+        savePlaybackPosition(videoPath, 0);
+        media.removeUpdateListener(onUpdate);
+        return;
+      }
+      const t = media.getEstimatedTime();
+      if (Math.abs(t - lastSaved) >= 5) {
+        lastSaved = t;
+        savePlaybackPosition(videoPath, t);
+      }
+    });
+  }
 
   function guessMime(name) {
     if (/\.mp4$/i.test(name)) return "video/mp4";

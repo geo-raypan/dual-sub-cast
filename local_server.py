@@ -11,7 +11,9 @@ script, and /play streams directly from that path.
 Subtitle style and per-file delay are also remembered here (style.json,
 sub_adjustments.json) and sent to the Chromecast receiver as customData on
 every cast -- never written into the receiver's own files, so tuning them
-never needs a git push.
+never needs a git push. Playback position per video (playback_positions.json)
+is saved periodically by the sender while casting, so a long movie can be
+resumed later instead of restarting from 0:00.
 
 Run this on the same machine as Chrome. It binds to 0.0.0.0 so the Chromecast
 device on your LAN can fetch the files directly.
@@ -97,6 +99,27 @@ def save_style(style):
 # of waiting on a git push + GitHub Pages redeploy.
 STYLE = load_style()
 
+PLAYBACK_FILE = os.path.join(APP_DIR, "playback_positions.json")
+
+
+def load_playback():
+    try:
+        with open(PLAYBACK_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_playback(positions):
+    with open(PLAYBACK_FILE, "w", encoding="utf-8") as f:
+        json.dump(positions, f)
+
+
+# Keyed by absolute video path -> seconds. The sender saves this every few
+# seconds while casting so a long movie can be resumed later, and clears it
+# back to 0 when playback reaches the end.
+PLAYBACK = load_playback()
+
 
 def pick_file(kind):
     """Open a native file-picker dialog on the server machine and return the
@@ -141,6 +164,9 @@ class RangeRequestHandler(http.server.BaseHTTPRequestHandler):
         if parsed.path == "/style":
             self.send_json(200, STYLE)
             return
+        if parsed.path == "/playback_position":
+            self.handle_get_playback_position(parsed)
+            return
         if parsed.path in ("/", "/index.html", "/sender.html", "/preview.html"):
             self.serve_app_file("index.html")
             return
@@ -153,6 +179,9 @@ class RangeRequestHandler(http.server.BaseHTTPRequestHandler):
             return
         if parsed.path == "/sub_adjustment":
             self.handle_set_sub_adjustment()
+            return
+        if parsed.path == "/playback_position":
+            self.handle_set_playback_position()
             return
         self.send_error(404, "Not found")
 
@@ -229,6 +258,27 @@ class RangeRequestHandler(http.server.BaseHTTPRequestHandler):
 
         STYLE.update({"font_size": font_size, "sub1_bottom": sub1_bottom, "sub2_bottom": sub2_bottom})
         save_style(STYLE)
+        self.send_json(200, {"ok": True})
+
+    def handle_get_playback_position(self, parsed):
+        query = urllib.parse.parse_qs(parsed.query)
+        path = (query.get("path") or [""])[0]
+        self.send_json(200, {"position": PLAYBACK.get(path, 0)})
+
+    def handle_set_playback_position(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length) or b"{}")
+            path = payload["path"]
+            position = float(payload["position"])
+            if not path or position < 0:
+                raise ValueError("invalid path or negative position")
+        except (KeyError, ValueError, TypeError, json.JSONDecodeError) as e:
+            self.send_json(400, {"ok": False, "error": f"invalid payload: {e}"})
+            return
+
+        PLAYBACK[path] = position
+        save_playback(PLAYBACK)
         self.send_json(200, {"ok": True})
 
     def send_json(self, status, obj):
