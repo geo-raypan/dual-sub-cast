@@ -63,18 +63,26 @@
   }
   button.primary:hover:not(:disabled) { background: var(--accent-dk); }
 
+  /* container-type: size + a fixed 16:9 box makes 1cqh below always mean
+     "1% of this box's height", regardless of how tall the actual browser
+     window is -- matching what 1vh means on the Chromecast, which plays the
+     video full-screen (so vh there IS the video's height). Without this,
+     the same numeric font-size looked a different relative size in the
+     preview (video only fills part of the page) than on the TV (video
+     fills the whole screen). */
   .stage {
     position: relative; max-width: 100%; margin: 0 auto; background: #000; border-radius: 4px; overflow: hidden;
+    container-type: size; container-name: stage; aspect-ratio: 16 / 9;
   }
-  video { width: 100%; display: block; }
+  video { width: 100%; height: 100%; object-fit: contain; display: block; }
 
   #sub1, #sub2 {
     position: absolute; left: 0; right: 0; text-align: center; color: #fff;
     font-family: sans-serif; text-shadow: 0 0 4px #000, 0 0 4px #000, 0 0 4px #000;
-    pointer-events: none; white-space: pre-line; font-size: var(--sub-font-size, 4vh);
+    pointer-events: none; white-space: pre-line; font-size: var(--sub-font-size, 4cqh);
   }
-  #sub1 { bottom: var(--sub1-bottom, 12vh); }
-  #sub2 { bottom: var(--sub2-bottom, 5vh); }
+  #sub1 { bottom: var(--sub1-bottom, 12cqh); }
+  #sub2 { bottom: var(--sub2-bottom, 5cqh); }
 
   .hint { font-size: 11.5px; color: var(--ink-faint); margin-top: 8px; }
 
@@ -130,6 +138,7 @@
         <span class="name" id="pickedSub2">(none)</span>
       </div>
     </div>
+    <div class="hint">Subtitle formats: SRT, WebVTT, ASS/SSA, SBV. (MicroDVD .sub is frame-number based and isn't supported.)</div>
   </div>
 
   <div class="card">
@@ -232,10 +241,74 @@
     return cues;
   }
 
+  // Advanced SubStation Alpha / SubStation Alpha: completely different from
+  // SRT/VTT -- centisecond timestamps, a Dialogue: line per cue whose field
+  // order comes from the preceding Format: line, and inline {\...} style
+  // override tags plus literal "\N"/"\h" escapes instead of real newlines/spaces.
+  function parseAss(text) {
+    const cues = [];
+    const lines = text.replace(/\r/g, "").split("\n");
+    let inEvents = false;
+    let textIdx = 9; // standard Events order: ...,Effect,Text (index 9 of 10 fields)
+    const timeRe = /(\d+):(\d{2}):(\d{2})\.(\d{2})/;
+    for (const line of lines) {
+      if (/^\[Events\]/i.test(line)) { inEvents = true; continue; }
+      if (/^\[/.test(line)) { inEvents = false; continue; }
+      if (!inEvents) continue;
+      if (/^Format:/i.test(line)) {
+        const fields = line.slice(line.indexOf(":") + 1).split(",").map(s => s.trim().toLowerCase());
+        const idx = fields.indexOf("text");
+        if (idx !== -1) textIdx = idx;
+        continue;
+      }
+      if (!/^Dialogue:/i.test(line)) continue;
+      const parts = line.slice(line.indexOf(":") + 1).split(",");
+      if (parts.length <= textIdx) continue;
+      const sm = (parts[1] || "").trim().match(timeRe);
+      const em = (parts[2] || "").trim().match(timeRe);
+      if (!sm || !em) continue;
+      const toSec = m => parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseInt(m[3]) + parseInt(m[4]) * 10 / 1000;
+      const start = toSec(sm), end = toSec(em);
+      const text = parts.slice(textIdx).join(",")
+        .replace(/\{[^}]*\}/g, "")
+        .replace(/\\N/gi, "\n")
+        .replace(/\\h/g, " ")
+        .trim();
+      cues.push({ start, end, text });
+    }
+    return cues;
+  }
+
+  // YouTube's SBV format: "H:MM:SS.mmm,H:MM:SS.mmm" header line, no "-->".
+  function parseSbv(text) {
+    const cues = [];
+    const blocks = text.replace(/\r/g, "").split(/\n\n+/);
+    const timeRe = /(\d+):(\d{2}):(\d{2})\.(\d{3}),(\d+):(\d{2}):(\d{2})\.(\d{3})/;
+    for (const block of blocks) {
+      const lines = block.split("\n").filter(l => l.trim() !== "");
+      if (!lines.length) continue;
+      const m = lines[0].match(timeRe);
+      if (!m) continue;
+      const toSec = (h, mi, s, ms) => parseInt(h) * 3600 + parseInt(mi) * 60 + parseInt(s) + parseInt(ms) / 1000;
+      const start = toSec(m[1], m[2], m[3], m[4]);
+      const end = toSec(m[5], m[6], m[7], m[8]);
+      cues.push({ start, end, text: lines.slice(1).join("\n") });
+    }
+    return cues;
+  }
+
+  // Format is sniffed from content, not the URL/extension -- /play?which=... has
+  // neither, since the file is streamed straight from whatever path was picked.
+  function parseSubtitle(text) {
+    if (/^﻿?\[Script Info\]/im.test(text) || /^Dialogue:/im.test(text)) return parseAss(text);
+    if (/^\d+:\d{2}:\d{2}\.\d{3},\d+:\d{2}:\d{2}\.\d{3}/m.test(text) && !/-->/.test(text)) return parseSbv(text);
+    return parseVtt(text);
+  }
+
   async function fetchCues(url) {
     if (!url) return [];
     const res = await fetch(url);
-    return parseVtt(await res.text());
+    return parseSubtitle(await res.text());
   }
 
   function cueTextAt(cues, t) {
@@ -378,9 +451,9 @@
   const cssOut = document.getElementById("cssOut");
 
   function updateTuner() {
-    root.setProperty("--sub-font-size", tuneFont.value + "vh");
-    root.setProperty("--sub1-bottom", tuneSub1.value + "vh");
-    root.setProperty("--sub2-bottom", tuneSub2.value + "vh");
+    root.setProperty("--sub-font-size", tuneFont.value + "cqh");
+    root.setProperty("--sub1-bottom", tuneSub1.value + "cqh");
+    root.setProperty("--sub2-bottom", tuneSub2.value + "cqh");
     tuneFontVal.textContent = tuneFont.value + "vh";
     tuneSub1Val.textContent = tuneSub1.value + "vh";
     tuneSub2Val.textContent = tuneSub2.value + "vh";

@@ -14,6 +14,17 @@ On Error Resume Next
 shell.Run "taskkill /F /IM python.exe", 0, True
 On Error Goto 0
 
+' Pull the latest code and receiver files before starting, so a fresh
+' git push from elsewhere shows up here without a manual "git pull" every
+' time. Uses the credentials already cached by git (same ones the Apply
+' Style button's automatic push already relies on) -- if that's not set up
+' yet, or there's no internet, this silently does nothing and start-up
+' continues anyway with whatever is on disk.
+On Error Resume Next
+shell.Run "cmd /c git -C """ & scriptDir & """ pull", 0, True
+shell.Run "cmd /c git -C """ & scriptDir & "\receiver"" pull", 0, True
+On Error Goto 0
+
 ' python.exe (not pythonw.exe) keeps real stdout/stderr handles, just hidden by
 ' windowStyle 0 below -- pythonw.exe detaches them entirely, which crashes
 ' every request because http.server tries to log errors to a null stderr.

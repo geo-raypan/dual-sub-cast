@@ -30,8 +30,8 @@ RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
 
 FILE_TYPES = {
     "video": [("Video files", "*.mp4 *.mkv *.webm *.mov *.avi *.wmv"), ("All files", "*.*")],
-    "sub1": [("Subtitle files", "*.srt *.vtt"), ("All files", "*.*")],
-    "sub2": [("Subtitle files", "*.srt *.vtt"), ("All files", "*.*")],
+    "sub1": [("Subtitle files", "*.srt *.vtt *.ass *.ssa *.sbv"), ("All files", "*.*")],
+    "sub2": [("Subtitle files", "*.srt *.vtt *.ass *.ssa *.sbv"), ("All files", "*.*")],
 }
 
 
