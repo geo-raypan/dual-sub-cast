@@ -8,6 +8,11 @@ a native file picker (running here on the server, so it can browse the whole
 disk); the chosen absolute path is remembered in selection.json next to this
 script, and /play streams directly from that path.
 
+Subtitle style and per-file delay are also remembered here (style.json,
+sub_adjustments.json) and sent to the Chromecast receiver as customData on
+every cast -- never written into the receiver's own files, so tuning them
+never needs a git push.
+
 Run this on the same machine as Chrome. It binds to 0.0.0.0 so the Chromecast
 device on your LAN can fetch the files directly.
 """
@@ -17,13 +22,11 @@ import mimetypes
 import os
 import re
 import socket
-import subprocess
 import sys
 import urllib.parse
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8787
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-RECEIVER_DIR = os.path.join(APP_DIR, "receiver")
 SELECTION_FILE = os.path.join(APP_DIR, "selection.json")
 
 RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
@@ -71,6 +74,29 @@ def save_sub_adjustments(adjustments):
 # remembered and re-applied automatically next time that same file is picked.
 SUB_ADJUSTMENTS = load_sub_adjustments()
 
+STYLE_FILE = os.path.join(APP_DIR, "style.json")
+DEFAULT_STYLE = {"font_size": 3.5, "sub1_bottom": 9.5, "sub2_bottom": 0.0}
+
+
+def load_style():
+    try:
+        with open(STYLE_FILE, "r", encoding="utf-8") as f:
+            return {**DEFAULT_STYLE, **json.load(f)}
+    except (OSError, json.JSONDecodeError):
+        return dict(DEFAULT_STYLE)
+
+
+def save_style(style):
+    with open(STYLE_FILE, "w", encoding="utf-8") as f:
+        json.dump(style, f)
+
+
+# Not written into receiver/index.html or pushed to GitHub anymore -- sent to
+# the receiver as customData on every LOAD, same mechanism as the per-file
+# subtitle delay, so a style tweak takes effect on the very next cast instead
+# of waiting on a git push + GitHub Pages redeploy.
+STYLE = load_style()
+
 
 def pick_file(kind):
     """Open a native file-picker dialog on the server machine and return the
@@ -112,6 +138,9 @@ class RangeRequestHandler(http.server.BaseHTTPRequestHandler):
         if parsed.path == "/sub_adjustment":
             self.handle_get_sub_adjustment(parsed)
             return
+        if parsed.path == "/style":
+            self.send_json(200, STYLE)
+            return
         if parsed.path in ("/", "/index.html", "/sender.html", "/preview.html"):
             self.serve_app_file("index.html")
             return
@@ -119,8 +148,8 @@ class RangeRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path == "/apply_style":
-            self.handle_apply_style()
+        if parsed.path == "/style":
+            self.handle_set_style()
             return
         if parsed.path == "/sub_adjustment":
             self.handle_set_sub_adjustment()
@@ -184,7 +213,7 @@ class RangeRequestHandler(http.server.BaseHTTPRequestHandler):
         save_sub_adjustments(SUB_ADJUSTMENTS)
         self.send_json(200, {"ok": True})
 
-    def handle_apply_style(self):
+    def handle_set_style(self):
         try:
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length) or b"{}")
@@ -198,28 +227,8 @@ class RangeRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_json(400, {"ok": False, "error": f"invalid payload: {e}"})
             return
 
-        index_path = os.path.join(RECEIVER_DIR, "index.html")
-        try:
-            html = open(index_path, "r", encoding="utf-8").read()
-            html, n1 = re.subn(r"font-size: [\d.]+vh;", f"font-size: {font_size}vh;", html, count=1)
-            html, n2 = re.subn(r"(#sub1 \{ bottom: )[\d.]+vh;", rf"\g<1>{sub1_bottom}vh;", html, count=1)
-            html, n3 = re.subn(r"(#sub2 \{ bottom: )[\d.]+vh;", rf"\g<1>{sub2_bottom}vh;", html, count=1)
-            if not (n1 and n2 and n3):
-                raise RuntimeError("expected CSS patterns not found in receiver/index.html")
-            open(index_path, "w", encoding="utf-8").write(html)
-
-            subprocess.run(["git", "-C", RECEIVER_DIR, "add", "index.html"], check=True, capture_output=True)
-            commit = subprocess.run(
-                ["git", "-C", RECEIVER_DIR, "commit", "-m", "Tune subtitle style via preview"],
-                capture_output=True, text=True
-            )
-            if commit.returncode != 0 and "nothing to commit" not in commit.stdout:
-                raise RuntimeError(commit.stdout + commit.stderr)
-            subprocess.run(["git", "-C", RECEIVER_DIR, "push"], check=True, capture_output=True)
-        except Exception as e:
-            self.send_json(500, {"ok": False, "error": str(e)})
-            return
-
+        STYLE.update({"font_size": font_size, "sub1_bottom": sub1_bottom, "sub2_bottom": sub2_bottom})
+        save_style(STYLE)
         self.send_json(200, {"ok": True})
 
     def send_json(self, status, obj):

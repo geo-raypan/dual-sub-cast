@@ -118,9 +118,9 @@
 
   hr.sep { border: none; border-top: 1px solid var(--line-soft); margin: 16px 0; }
 
-  #applyStatus, #adjustStatus { font-size: 11.5px; margin-top: 6px; color: var(--ink-faint); white-space: pre-wrap; }
-  #applyStatus.ok, #adjustStatus.ok { color: var(--ok); }
-  #applyStatus.err, #adjustStatus.err { color: var(--bad); }
+  #styleStatus, #adjustStatus { font-size: 11.5px; margin-top: 6px; color: var(--ink-faint); white-space: pre-wrap; }
+  #styleStatus.ok, #adjustStatus.ok { color: var(--ok); }
+  #styleStatus.err, #adjustStatus.err { color: var(--bad); }
 
   #castOut { max-width: var(--max-w); margin: 4px auto 0; display: block; width: 100%; padding: 12px; font-size: 15px; }
   #status { max-width: var(--max-w); margin: 8px auto 0; color: var(--ink-soft); white-space: pre-wrap; font-size: 12.5px; text-align: center; }
@@ -187,9 +187,8 @@
         <input type="range" id="tuneSub2" min="0" max="40" step="0.5" value="5">
         <span id="tuneSub2Val">5vh</span>
       </div>
-      <textarea id="cssOut" rows="4" readonly></textarea>
-      <button id="applyBtn" style="margin-top:10px;width:100%;">Apply style to Chromecast (write to receiver and push to GitHub Pages)</button>
-      <div id="applyStatus"></div>
+      <div class="hint">Saved automatically and sent to the receiver on every cast -- no GitHub push, applies on the very next cast.</div>
+      <div id="styleStatus"></div>
     </details>
 
     <details class="card" open>
@@ -468,54 +467,53 @@
   const tuneFontVal = document.getElementById("tuneFontVal");
   const tuneSub1Val = document.getElementById("tuneSub1Val");
   const tuneSub2Val = document.getElementById("tuneSub2Val");
-  const cssOut = document.getElementById("cssOut");
+  const styleStatus = document.getElementById("styleStatus");
+  let style = { font_size: 4, sub1_bottom: 12, sub2_bottom: 5 };
 
-  function updateTuner() {
+  function updateTunerDisplay() {
     root.setProperty("--sub-font-size", tuneFont.value + "cqh");
     root.setProperty("--sub1-bottom", tuneSub1.value + "cqh");
     root.setProperty("--sub2-bottom", tuneSub2.value + "cqh");
     tuneFontVal.textContent = tuneFont.value + "vh";
     tuneSub1Val.textContent = tuneSub1.value + "vh";
     tuneSub2Val.textContent = tuneSub2.value + "vh";
-    cssOut.value =
-`font-size: ${tuneFont.value}vh;
-#sub1 { bottom: ${tuneSub1.value}vh; }
-#sub2 { bottom: ${tuneSub2.value}vh; }`;
   }
-  [tuneFont, tuneSub1, tuneSub2].forEach(el => el.addEventListener("input", updateTuner));
-  updateTuner();
 
-  const applyBtn = document.getElementById("applyBtn");
-  const applyStatus = document.getElementById("applyStatus");
-  applyBtn.addEventListener("click", async () => {
-    applyBtn.disabled = true;
-    applyStatus.classList.remove("ok", "err");
-    applyStatus.textContent = "Applying: writing file and pushing...";
-    try {
-      const res = await fetch("/apply_style", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          font_size: parseFloat(tuneFont.value),
-          sub1_bottom: parseFloat(tuneSub1.value),
-          sub2_bottom: parseFloat(tuneSub2.value)
-        })
-      });
-      const data = await res.json();
-      if (data.ok) {
-        applyStatus.classList.add("ok");
-        applyStatus.textContent = "Applied and pushed successfully! Once GitHub Pages updates (about 1-2 minutes), the next cast will use the new style.";
-      } else {
-        applyStatus.classList.add("err");
-        applyStatus.textContent = "Apply failed: " + data.error;
+  let saveStyleTimer = null;
+  function onStyleInput() {
+    style = { font_size: parseFloat(tuneFont.value), sub1_bottom: parseFloat(tuneSub1.value), sub2_bottom: parseFloat(tuneSub2.value) };
+    updateTunerDisplay();
+    styleStatus.classList.remove("ok", "err");
+    styleStatus.textContent = "Saving...";
+    clearTimeout(saveStyleTimer);
+    saveStyleTimer = setTimeout(async () => {
+      try {
+        await fetch("/style", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(style)
+        });
+        styleStatus.classList.add("ok");
+        styleStatus.textContent = "Saved.";
+      } catch (e) {
+        styleStatus.classList.add("err");
+        styleStatus.textContent = "Save failed: " + e;
       }
-    } catch (e) {
-      applyStatus.classList.add("err");
-      applyStatus.textContent = "Connection failed: " + e;
-    } finally {
-      applyBtn.disabled = false;
-    }
-  });
+    }, 400);
+  }
+  [tuneFont, tuneSub1, tuneSub2].forEach(el => el.addEventListener("input", onStyleInput));
+
+  async function loadStyle() {
+    try {
+      const res = await fetch("/style");
+      style = await res.json();
+      tuneFont.value = style.font_size;
+      tuneSub1.value = style.sub1_bottom;
+      tuneSub2.value = style.sub2_bottom;
+    } catch (e) { /* keep the slider defaults */ }
+    updateTunerDisplay();
+  }
+  loadStyle();
 
   let castContext = null;
 
@@ -556,7 +554,10 @@
         sub1Url: pickedNames.sub1 ? mediaOrigin + "/play?which=sub1" : null,
         sub2Url: pickedNames.sub2 ? mediaOrigin + "/play?which=sub2" : null,
         sub1Offset: subAdjust.sub1.offset,
-        sub2Offset: subAdjust.sub2.offset
+        sub2Offset: subAdjust.sub2.offset,
+        fontSize: style.font_size,
+        sub1Bottom: style.sub1_bottom,
+        sub2Bottom: style.sub2_bottom
       };
       const request = new chrome.cast.media.LoadRequest(mediaInfo);
       session.loadMedia(request).then(
