@@ -75,7 +75,7 @@ def save_sub_adjustments(adjustments):
 SUB_ADJUSTMENTS = load_sub_adjustments()
 
 STYLE_FILE = os.path.join(APP_DIR, "style.json")
-DEFAULT_STYLE = {"font_size": 3.5, "sub1_bottom": 9.5, "sub2_bottom": 0.0}
+DEFAULT_STYLE = {"font_size": 4.0, "sub1_bottom": 0.5, "sub2_bottom": 12.5}
 
 
 def load_style():
