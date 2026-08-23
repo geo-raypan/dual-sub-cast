@@ -103,17 +103,17 @@ class RangeRequestHandler(http.server.BaseHTTPRequestHandler):
         if parsed.path == "/pick":
             self.handle_pick(parsed)
             return
+        if parsed.path == "/clear_selection":
+            self.handle_clear_selection(parsed)
+            return
         if parsed.path == "/play":
             self.handle_play(parsed)
             return
         if parsed.path == "/sub_adjustment":
             self.handle_get_sub_adjustment(parsed)
             return
-        if parsed.path in ("/", "/sender.html"):
-            self.serve_app_file("sender.html")
-            return
-        if parsed.path == "/preview.html":
-            self.serve_app_file("preview.html")
+        if parsed.path in ("/", "/index.html", "/sender.html", "/preview.html"):
+            self.serve_app_file("index.html")
             return
         self.send_error(404, "Not found")
 
@@ -143,6 +143,16 @@ class RangeRequestHandler(http.server.BaseHTTPRequestHandler):
         save_selection(SELECTION)
         self.send_json(200, {"ok": True, "path": path, "name": os.path.basename(path)})
 
+    def handle_clear_selection(self, parsed):
+        query = urllib.parse.parse_qs(parsed.query)
+        kind = (query.get("kind") or [""])[0]
+        if kind not in ("video", "sub1", "sub2"):
+            self.send_json(400, {"ok": False, "error": "kind must be video, sub1, or sub2"})
+            return
+        SELECTION[kind] = None
+        save_selection(SELECTION)
+        self.send_json(200, {"ok": True})
+
     def handle_play(self, parsed):
         query = urllib.parse.parse_qs(parsed.query)
         which = (query.get("which") or [""])[0]
@@ -155,8 +165,8 @@ class RangeRequestHandler(http.server.BaseHTTPRequestHandler):
     def handle_get_sub_adjustment(self, parsed):
         query = urllib.parse.parse_qs(parsed.query)
         path = (query.get("path") or [""])[0]
-        adj = SUB_ADJUSTMENTS.get(path, {"offset": 0, "speed": 1})
-        self.send_json(200, adj)
+        adj = SUB_ADJUSTMENTS.get(path, {"offset": 0})
+        self.send_json(200, {"offset": adj.get("offset", 0)})
 
     def handle_set_sub_adjustment(self):
         try:
@@ -164,14 +174,13 @@ class RangeRequestHandler(http.server.BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length) or b"{}")
             path = payload["path"]
             offset = float(payload["offset"])
-            speed = float(payload["speed"])
-            if not path or not (0.1 <= speed <= 3):
-                raise ValueError("invalid path or speed out of range")
+            if not path:
+                raise ValueError("invalid path")
         except (KeyError, ValueError, TypeError, json.JSONDecodeError) as e:
             self.send_json(400, {"ok": False, "error": f"invalid payload: {e}"})
             return
 
-        SUB_ADJUSTMENTS[path] = {"offset": offset, "speed": speed}
+        SUB_ADJUSTMENTS[path] = {"offset": offset}
         save_sub_adjustments(SUB_ADJUSTMENTS)
         self.send_json(200, {"ok": True})
 

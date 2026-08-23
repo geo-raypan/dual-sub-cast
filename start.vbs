@@ -23,4 +23,4 @@ shell.Run "python.exe """ & scriptDir & "\local_server.py"" 8899", 0, False
 ' Give the server a moment to bind the port before opening the browser
 WScript.Sleep 1500
 
-shell.Run "http://localhost:8899/sender.html"
+shell.Run "http://localhost:8899/"

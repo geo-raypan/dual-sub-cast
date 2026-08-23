@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Dual Subtitle Chromecast</title>
+<style>
+  :root {
+    --bg:        #f4f5f7;
+    --card:      #ffffff;
+    --ink:       #1f2328;
+    --ink-soft:  #5b6472;
+    --ink-faint: #8a93a0;
+    --line:      #d8dce2;
+    --line-soft: #e8ebef;
+    --accent:    #1f5fa9;
+    --accent-dk: #17497f;
+    --ok:        #1a7f4b;
+    --bad:       #b3261e;
+    --max-w:     900px;
+  }
+  * { box-sizing: border-box; }
+  body { font: 13px/1.45 "Segoe UI", -apple-system, system-ui, sans-serif; margin: 0; padding: 24px 16px 60px; background: var(--bg); color: var(--ink); }
+
+  h1 {
+    max-width: var(--max-w); margin: 0 auto 18px; display: flex; align-items: center; gap: 10px;
+    font-size: 18px; font-weight: 600;
+  }
+  google-cast-launcher { width: 26px; height: 26px; margin-left: auto; }
+
+  .card {
+    max-width: var(--max-w); margin: 0 auto 14px; background: var(--card);
+    border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px 16px;
+  }
+  .card h2 {
+    margin: 0 0 12px; font-size: 12px; font-weight: 600; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--ink-soft); display: flex; align-items: center; gap: 8px;
+  }
+  .num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px; border-radius: 50%; background: var(--accent);
+    color: #fff; font-size: 11px; letter-spacing: 0; flex-shrink: 0;
+  }
+
+  .pickers { display: flex; gap: 12px; flex-wrap: wrap; }
+  .picker { display: flex; flex-direction: column; font-size: 12px; gap: 5px; flex: 1 1 220px; color: var(--ink-soft); }
+  .picker .btn-row { display: flex; gap: 4px; }
+  .picker .name { font-size: 11px; word-break: break-all; color: var(--ink-faint); }
+  .picker .name.set { color: var(--accent); }
+
+  button {
+    padding: 6px 14px; border: 1px solid var(--line); border-radius: 4px;
+    background: #fff; color: var(--ink); font: inherit; cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #f0f2f5; }
+  button:disabled { color: var(--ink-faint); cursor: default; }
+
+  button.pick { flex: 1; min-width: 0; }
+  button.clear { padding: 6px 10px; color: var(--ink-faint); }
+  button.clear:hover { color: var(--bad); background: #fbeceb; border-color: #e6b8b4; }
+
+  button.primary {
+    background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600;
+  }
+  button.primary:hover:not(:disabled) { background: var(--accent-dk); }
+
+  .stage {
+    position: relative; max-width: 100%; margin: 0 auto; background: #000; border-radius: 4px; overflow: hidden;
+  }
+  video { width: 100%; display: block; }
+
+  #sub1, #sub2 {
+    position: absolute; left: 0; right: 0; text-align: center; color: #fff;
+    font-family: sans-serif; text-shadow: 0 0 4px #000, 0 0 4px #000, 0 0 4px #000;
+    pointer-events: none; white-space: pre-line; font-size: var(--sub-font-size, 4vh);
+  }
+  #sub1 { bottom: var(--sub1-bottom, 12vh); }
+  #sub2 { bottom: var(--sub2-bottom, 5vh); }
+
+  .hint { font-size: 11.5px; color: var(--ink-faint); margin-top: 8px; }
+
+  .row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+  .row:last-child { margin-bottom: 0; }
+  .row > span:first-child { width: 130px; flex-shrink: 0; color: var(--ink-soft); }
+  .row > span:last-child { width: 55px; text-align: right; font-variant-numeric: tabular-nums; }
+  input[type="range"] { flex: 1; min-width: 80px; accent-color: var(--accent); }
+  button.mark { font-size: 12px; padding: 5px 10px; white-space: nowrap; }
+
+  textarea {
+    width: 100%; margin-top: 8px; font-family: monospace; font-size: 12px;
+    background: #fafbfc; color: var(--ink-soft); border: 1px solid var(--line); border-radius: 4px; padding: 6px;
+  }
+
+  hr.sep { border: none; border-top: 1px solid var(--line-soft); margin: 16px 0; }
+
+  #applyStatus, #adjustStatus { font-size: 11.5px; margin-top: 6px; color: var(--ink-faint); white-space: pre-wrap; }
+  #applyStatus.ok, #adjustStatus.ok { color: var(--ok); }
+  #applyStatus.err, #adjustStatus.err { color: var(--bad); }
+
+  #castOut { max-width: var(--max-w); margin: 4px auto 0; display: block; width: 100%; padding: 12px; font-size: 15px; }
+  #status { max-width: var(--max-w); margin: 8px auto 0; color: var(--ink-soft); white-space: pre-wrap; font-size: 12.5px; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>📽️ Dual Subtitle Cast <google-cast-launcher id="castBtn"></google-cast-launcher></h1>
+
+  <div class="card">
+    <h2><span class="num">1</span>Choose files</h2>
+    <div class="pickers">
+      <div class="picker">
+        Video
+        <div class="btn-row">
+          <button class="pick" data-kind="video">📁 Choose Video...</button>
+        </div>
+        <span class="name" id="pickedVideo">(none)</span>
+      </div>
+      <div class="picker">
+        Subtitle 1 (top, optional)
+        <div class="btn-row">
+          <button class="pick" data-kind="sub1">📁 Choose Subtitle 1...</button>
+          <button class="clear" data-clear="sub1" title="Clear">✕</button>
+        </div>
+        <span class="name" id="pickedSub1">(none)</span>
+      </div>
+      <div class="picker">
+        Subtitle 2 (bottom, optional)
+        <div class="btn-row">
+          <button class="pick" data-kind="sub2">📁 Choose Subtitle 2...</button>
+          <button class="clear" data-clear="sub2" title="Clear">✕</button>
+        </div>
+        <span class="name" id="pickedSub2">(none)</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><span class="num">2</span>Preview</h2>
+    <div class="stage">
+      <video id="player" controls></video>
+      <div id="sub1"></div>
+      <div id="sub2"></div>
+    </div>
+    <div class="hint">Plays locally in the browser, not on the Chromecast. Left/Right arrow keys seek ±5s (click the video first, not a slider).</div>
+  </div>
+
+  <div class="card">
+    <h2><span class="num">3</span>Subtitle style</h2>
+    <div class="row">
+      <span>Font size</span>
+      <input type="range" id="tuneFont" min="1" max="10" step="0.1" value="4">
+      <span id="tuneFontVal">4vh</span>
+    </div>
+    <div class="row">
+      <span>Subtitle 1 position</span>
+      <input type="range" id="tuneSub1" min="0" max="40" step="0.5" value="12">
+      <span id="tuneSub1Val">12vh</span>
+    </div>
+    <div class="row">
+      <span>Subtitle 2 position</span>
+      <input type="range" id="tuneSub2" min="0" max="40" step="0.5" value="5">
+      <span id="tuneSub2Val">5vh</span>
+    </div>
+    <textarea id="cssOut" rows="4" readonly></textarea>
+    <button id="applyBtn" style="margin-top:10px;width:100%;">Apply style to Chromecast (write to receiver and push to GitHub Pages)</button>
+    <div id="applyStatus"></div>
+  </div>
+
+  <div class="card">
+    <h2><span class="num">4</span>Subtitle sync</h2>
+    <div class="row">
+      <span>Sub 1 delay (s)</span>
+      <input type="range" id="delaySub1" min="-60" max="60" step="0.1" value="0">
+      <span id="delaySub1Val">0.0s</span>
+      <button class="mark" data-mark="sub1">Mark: line 1 is now</button>
+    </div>
+    <div class="row">
+      <span>Sub 2 delay (s)</span>
+      <input type="range" id="delaySub2" min="-60" max="60" step="0.1" value="0">
+      <span id="delaySub2Val">0.0s</span>
+      <button class="mark" data-mark="sub2">Mark: line 1 is now</button>
+    </div>
+    <div class="hint">
+      Rough sync: play the preview, pause exactly when the subtitle's first line is spoken, then click "Mark: line 1 is now" to compute the delay from that instant. Then fine-tune with the slider. Remembered per subtitle file -- picking the same file later restores it, and it's applied automatically when you cast.
+    </div>
+    <div id="adjustStatus"></div>
+  </div>
+
+  <button id="castOut" class="primary">Cast to Chromecast</button>
+  <div id="status"></div>
+
+<script>
+  const RECEIVER_APP_ID = "775775DC";
+
+  const status = document.getElementById("status");
+  function log(msg) { status.textContent = msg; console.log(msg); }
+
+  let mediaOrigin = window.location.origin;
+  async function resolveMediaOrigin() {
+    try {
+      const res = await fetch("/whoami");
+      const data = await res.json();
+      mediaOrigin = `http://${data.lan_ip}:${data.port}`;
+    } catch (e) {
+      log("Could not resolve the LAN address; falling back to the current origin. Chromecast may not be able to reach it.");
+    }
+  }
+  resolveMediaOrigin();
+
+  let cues1 = [], cues2 = [];
+  const pickedNames = { video: null, sub1: null, sub2: null };
+  const pickedPaths = { video: null, sub1: null, sub2: null };
+  const subAdjust = { sub1: { offset: 0 }, sub2: { offset: 0 } };
+  const pickedEls = { video: document.getElementById("pickedVideo"), sub1: document.getElementById("pickedSub1"), sub2: document.getElementById("pickedSub2") };
+  const player = document.getElementById("player");
+  const el1 = document.getElementById("sub1");
+  const el2 = document.getElementById("sub2");
+
+  function parseVtt(text) {
+    const cues = [];
+    const blocks = text.replace(/\r/g, "").split(/\n\n+/);
+    const timeRe = /(\d{2}:)?(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{2}:)?(\d{2}):(\d{2})[.,](\d{3})/;
+    for (const block of blocks) {
+      const lines = block.split("\n").filter(l => l.trim() !== "" && l.trim() !== "WEBVTT");
+      const timeLineIdx = lines.findIndex(l => timeRe.test(l));
+      if (timeLineIdx === -1) continue;
+      const m = lines[timeLineIdx].match(timeRe);
+      const toSec = (h, mi, s, ms) => (h ? parseInt(h) * 3600 : 0) + parseInt(mi) * 60 + parseInt(s) + parseInt(ms) / 1000;
+      const start = toSec(m[1] ? m[1].replace(":", "") : null, m[2], m[3], m[4]);
+      const end = toSec(m[5] ? m[5].replace(":", "") : null, m[6], m[7], m[8]);
+      const text = lines.slice(timeLineIdx + 1).join("\n").replace(/<[^>]+>/g, "");
+      cues.push({ start, end, text });
+    }
+    return cues;
+  }
+
+  async function fetchCues(url) {
+    if (!url) return [];
+    const res = await fetch(url);
+    return parseVtt(await res.text());
+  }
+
+  function cueTextAt(cues, t) {
+    const hit = cues.find(c => t >= c.start && t <= c.end);
+    return hit ? hit.text : "";
+  }
+
+  function setPickedLabel(kind, text, isSet) {
+    pickedEls[kind].textContent = text;
+    pickedEls[kind].classList.toggle("set", !!isSet);
+  }
+
+  async function loadSelection() {
+    const res = await fetch("/selection");
+    const data = await res.json();
+    for (const kind of ["video", "sub1", "sub2"]) {
+      pickedPaths[kind] = data[kind] || null;
+      pickedNames[kind] = data[kind] ? data[kind].split(/[\\/]/).pop() : null;
+      setPickedLabel(kind, pickedNames[kind] || "(none)", !!pickedNames[kind]);
+    }
+    await loadSubAdjustments();
+    applySelection();
+  }
+
+  document.querySelectorAll("button.pick").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const kind = btn.dataset.kind;
+      setPickedLabel(kind, "Waiting for file dialog...", false);
+      const res = await fetch("/pick?kind=" + kind);
+      const data = await res.json();
+      if (data.ok) {
+        pickedPaths[kind] = data.path;
+        pickedNames[kind] = data.name;
+        setPickedLabel(kind, data.name, true);
+        if (kind === "sub1" || kind === "sub2") await loadSubAdjustments();
+        applySelection();
+      } else {
+        setPickedLabel(kind, pickedNames[kind] || "(none)", !!pickedNames[kind]);
+      }
+    });
+  });
+
+  document.querySelectorAll("button.clear").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const kind = btn.dataset.clear;
+      await fetch("/clear_selection?kind=" + kind);
+      pickedPaths[kind] = null;
+      pickedNames[kind] = null;
+      setPickedLabel(kind, "(none)", false);
+      await loadSubAdjustments();
+      applySelection();
+    });
+  });
+
+  async function applySelection() {
+    if (pickedNames.video) player.src = "/play?which=video";
+    cues1 = await fetchCues(pickedNames.sub1 ? "/play?which=sub1" : null);
+    cues2 = await fetchCues(pickedNames.sub2 ? "/play?which=sub2" : null);
+  }
+
+  player.addEventListener("timeupdate", () => {
+    el1.textContent = cueTextAt(cues1, player.currentTime - subAdjust.sub1.offset);
+    el2.textContent = cueTextAt(cues2, player.currentTime - subAdjust.sub2.offset);
+  });
+
+  // Left/Right arrow keys seek the local preview by 5s, as long as focus
+  // isn't on a slider or button (which already use arrow keys themselves).
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    const tag = document.activeElement.tagName;
+    if (tag === "INPUT" || tag === "BUTTON" || tag === "TEXTAREA") return;
+    if (!pickedNames.video) return;
+    e.preventDefault();
+    player.currentTime = Math.max(0, player.currentTime + (e.key === "ArrowRight" ? 5 : -5));
+  });
+
+  loadSelection();
+
+  const delaySub1 = document.getElementById("delaySub1"), delaySub1Val = document.getElementById("delaySub1Val");
+  const delaySub2 = document.getElementById("delaySub2"), delaySub2Val = document.getElementById("delaySub2Val");
+  const adjustStatus = document.getElementById("adjustStatus");
+
+  async function loadSubAdjustments() {
+    for (const kind of ["sub1", "sub2"]) {
+      if (!pickedPaths[kind]) { subAdjust[kind] = { offset: 0 }; continue; }
+      const res = await fetch("/sub_adjustment?path=" + encodeURIComponent(pickedPaths[kind]));
+      subAdjust[kind] = await res.json();
+    }
+    delaySub1.value = subAdjust.sub1.offset;
+    delaySub2.value = subAdjust.sub2.offset;
+    updateAdjustLabels();
+  }
+
+  function updateAdjustLabels() {
+    delaySub1Val.textContent = parseFloat(delaySub1.value).toFixed(1) + "s";
+    delaySub2Val.textContent = parseFloat(delaySub2.value).toFixed(1) + "s";
+  }
+
+  let saveAdjustTimer = null;
+  function onAdjustInput(kind) {
+    subAdjust[kind] = { offset: parseFloat(kind === "sub1" ? delaySub1.value : delaySub2.value) };
+    updateAdjustLabels();
+    if (!pickedPaths[kind]) return;
+    adjustStatus.classList.remove("ok");
+    adjustStatus.textContent = "Saving...";
+    clearTimeout(saveAdjustTimer);
+    saveAdjustTimer = setTimeout(async () => {
+      await fetch("/sub_adjustment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: pickedPaths[kind], ...subAdjust[kind] })
+      });
+      adjustStatus.classList.add("ok");
+      adjustStatus.textContent = "Saved for " + pickedNames[kind];
+    }, 400);
+  }
+  delaySub1.addEventListener("input", () => onAdjustInput("sub1"));
+  delaySub2.addEventListener("input", () => onAdjustInput("sub2"));
+
+  // Rough-sync: pause the preview right when the subtitle's first line is
+  // actually spoken, then click Mark -- computes delay = currentTime - cue1.start.
+  document.querySelectorAll("button.mark").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const kind = btn.dataset.mark;
+      const cues = kind === "sub1" ? cues1 : cues2;
+      if (!cues.length) { adjustStatus.classList.remove("ok"); adjustStatus.classList.add("err"); adjustStatus.textContent = "No subtitle loaded for " + kind; return; }
+      const delay = player.currentTime - cues[0].start;
+      (kind === "sub1" ? delaySub1 : delaySub2).value = delay.toFixed(1);
+      onAdjustInput(kind);
+    });
+  });
+
+  const root = document.documentElement.style;
+  const tuneFont = document.getElementById("tuneFont");
+  const tuneSub1 = document.getElementById("tuneSub1");
+  const tuneSub2 = document.getElementById("tuneSub2");
+  const tuneFontVal = document.getElementById("tuneFontVal");
+  const tuneSub1Val = document.getElementById("tuneSub1Val");
+  const tuneSub2Val = document.getElementById("tuneSub2Val");
+  const cssOut = document.getElementById("cssOut");
+
+  function updateTuner() {
+    root.setProperty("--sub-font-size", tuneFont.value + "vh");
+    root.setProperty("--sub1-bottom", tuneSub1.value + "vh");
+    root.setProperty("--sub2-bottom", tuneSub2.value + "vh");
+    tuneFontVal.textContent = tuneFont.value + "vh";
+    tuneSub1Val.textContent = tuneSub1.value + "vh";
+    tuneSub2Val.textContent = tuneSub2.value + "vh";
+    cssOut.value =
+`font-size: ${tuneFont.value}vh;
+#sub1 { bottom: ${tuneSub1.value}vh; }
+#sub2 { bottom: ${tuneSub2.value}vh; }`;
+  }
+  [tuneFont, tuneSub1, tuneSub2].forEach(el => el.addEventListener("input", updateTuner));
+  updateTuner();
+
+  const applyBtn = document.getElementById("applyBtn");
+  const applyStatus = document.getElementById("applyStatus");
+  applyBtn.addEventListener("click", async () => {
+    applyBtn.disabled = true;
+    applyStatus.classList.remove("ok", "err");
+    applyStatus.textContent = "Applying: writing file and pushing...";
+    try {
+      const res = await fetch("/apply_style", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          font_size: parseFloat(tuneFont.value),
+          sub1_bottom: parseFloat(tuneSub1.value),
+          sub2_bottom: parseFloat(tuneSub2.value)
+        })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        applyStatus.classList.add("ok");
+        applyStatus.textContent = "Applied and pushed successfully! Once GitHub Pages updates (about 1-2 minutes), the next cast will use the new style.";
+      } else {
+        applyStatus.classList.add("err");
+        applyStatus.textContent = "Apply failed: " + data.error;
+      }
+    } catch (e) {
+      applyStatus.classList.add("err");
+      applyStatus.textContent = "Connection failed: " + e;
+    } finally {
+      applyBtn.disabled = false;
+    }
+  });
+
+  let castContext = null;
+
+  window['__onGCastApiAvailable'] = function(isAvailable) {
+    if (isAvailable) {
+      initCastApi();
+    } else {
+      log("Cast SDK reported unavailable (isAvailable=false). Make sure you're using desktop Chrome.");
+    }
+  };
+
+  setTimeout(() => {
+    if (!castContext) {
+      log("Cast SDK did not initialize within 5 seconds. Press F12 to open DevTools Console and check for red errors (common causes: can't reach www.gstatic.com, or not using Chrome).");
+    }
+  }, 5000);
+
+  function initCastApi() {
+    castContext = cast.framework.CastContext.getInstance();
+    castContext.setOptions({
+      receiverApplicationId: RECEIVER_APP_ID,
+      autoJoinPolicy: chrome.cast.AutoJoinPolicy.PAGE_SCOPED
+    });
+    log("Cast SDK ready. You can cast now.");
+  }
+
+  document.getElementById("castOut").addEventListener("click", () => {
+    if (!castContext) {
+      log("Cast SDK not initialized yet. Wait a moment or reload the page.");
+      return;
+    }
+    if (!pickedNames.video) { log("Please choose a video file first."); return; }
+
+    castContext.requestSession().then(() => {
+      const session = castContext.getCurrentSession();
+      const mediaInfo = new chrome.cast.media.MediaInfo(mediaOrigin + "/play?which=video", guessMime(pickedNames.video));
+      mediaInfo.customData = {
+        sub1Url: pickedNames.sub1 ? mediaOrigin + "/play?which=sub1" : null,
+        sub2Url: pickedNames.sub2 ? mediaOrigin + "/play?which=sub2" : null,
+        sub1Offset: subAdjust.sub1.offset,
+        sub2Offset: subAdjust.sub2.offset
+      };
+      const request = new chrome.cast.media.LoadRequest(mediaInfo);
+      session.loadMedia(request).then(
+        () => log("Casting started: " + pickedNames.video),
+        (err) => log("Cast failed: " + JSON.stringify(err))
+      );
+    }, (err) => {
+      const detail = err && typeof err === "object"
+        ? JSON.stringify(err, Object.getOwnPropertyNames(err))
+        : JSON.stringify(err);
+      log("Could not connect to Chromecast: code=" + (err && err.code) + " description=" + (err && err.description) + " raw=" + detail);
+      console.error("requestSession rejected:", err);
+    });
+  });
+
+  function guessMime(name) {
+    if (/\.mp4$/i.test(name)) return "video/mp4";
+    if (/\.webm$/i.test(name)) return "video/webm";
+    if (/\.mkv$/i.test(name)) return "video/x-matroska";
+    return "video/mp4";
+  }
+</script>
+<script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
+</body>
+</html>
