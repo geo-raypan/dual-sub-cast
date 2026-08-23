@@ -44,19 +44,18 @@
   <a href="/sender.html" style="display:inline-block;font-size:13px;margin-bottom:8px;color:#9cf;">← Back to sender</a>
   <div class="controls">
     <label>Video file
-      <select id="video"></select>
-      <input type="file" id="videoFile" accept="video/*">
+      <button data-kind="video">Choose Video...</button>
+      <span id="pickedVideo" style="font-size:11px;word-break:break-all;">(none)</span>
     </label>
     <label>Subtitle 1 (top)
-      <select id="sub1sel"><option value="">(none)</option></select>
-      <input type="file" id="sub1File" accept=".vtt,.srt">
+      <button data-kind="sub1">Choose Subtitle 1...</button>
+      <span id="pickedSub1" style="font-size:11px;word-break:break-all;">(none)</span>
     </label>
     <label>Subtitle 2 (bottom)
-      <select id="sub2sel"><option value="">(none)</option></select>
-      <input type="file" id="sub2File" accept=".vtt,.srt">
+      <button data-kind="sub2">Choose Subtitle 2...</button>
+      <span id="pickedSub2" style="font-size:11px;word-break:break-all;">(none)</span>
     </label>
   </div>
-  <div id="uploadStatus" style="max-width:900px;margin:0 auto 12px;font-size:12px;color:#9f9;"></div>
 
   <div class="stage">
     <video id="player" controls></video>
@@ -81,15 +80,39 @@
       <span id="tuneSub2Val">5vh</span>
     </div>
     <textarea id="cssOut" rows="4" readonly></textarea>
+    <hr style="border-color:#444;margin:14px 0;">
+    <div style="color:#9cf;margin-bottom:6px;">Per-file subtitle delay/speed (remembered per subtitle file):</div>
+    <div class="row">
+      <span>Sub1 delay (s)</span>
+      <input type="range" id="delaySub1" min="-15" max="15" step="0.1" value="0">
+      <span id="delaySub1Val">0.0s</span>
+    </div>
+    <div class="row">
+      <span>Sub1 speed</span>
+      <input type="range" id="speedSub1" min="0.8" max="1.2" step="0.001" value="1">
+      <span id="speedSub1Val">1.000x</span>
+    </div>
+    <div class="row">
+      <span>Sub2 delay (s)</span>
+      <input type="range" id="delaySub2" min="-15" max="15" step="0.1" value="0">
+      <span id="delaySub2Val">0.0s</span>
+    </div>
+    <div class="row">
+      <span>Sub2 speed</span>
+      <input type="range" id="speedSub2" min="0.8" max="1.2" step="0.001" value="1">
+      <span id="speedSub2Val">1.000x</span>
+    </div>
+    <div id="adjustStatus" style="font-size:11px;color:#9f9;margin-top:4px;"></div>
     <button id="applyBtn" style="margin-top:8px;padding:8px;width:100%;cursor:pointer;">Apply to Chromecast (write to receiver and push to GitHub Pages)</button>
     <div id="applyStatus" style="margin-top:6px;color:#9f9;white-space:pre-wrap;"></div>
   </div>
 
 <script>
   let cues1 = [], cues2 = [];
-  const videoSel = document.getElementById("video");
-  const sub1Sel = document.getElementById("sub1sel");
-  const sub2Sel = document.getElementById("sub2sel");
+  const pickedNames = { video: null, sub1: null, sub2: null };
+  const pickedPaths = { video: null, sub1: null, sub2: null };
+  const subAdjust = { sub1: { offset: 0, speed: 1 }, sub2: { offset: 0, speed: 1 } };
+  const pickedEls = { video: document.getElementById("pickedVideo"), sub1: document.getElementById("pickedSub1"), sub2: document.getElementById("pickedSub2") };
   const player = document.getElementById("player");
   const el1 = document.getElementById("sub1");
   const el2 = document.getElementById("sub2");
@@ -124,70 +147,101 @@
     return hit ? hit.text : "";
   }
 
-  async function loadFileList() {
-    const res = await fetch("/list.json");
+  async function loadSelection() {
+    const res = await fetch("/selection");
     const data = await res.json();
-    [videoSel, sub1Sel, sub2Sel].forEach(sel => {
-      while (sel.options.length > (sel === videoSel ? 0 : 1)) sel.remove(sel.options.length - 1);
-    });
-    data.files.forEach(name => {
-      const opt = () => { const o = document.createElement("option"); o.value = name; o.textContent = name; return o; };
-      if (/\.(mp4|mkv|webm|mov)$/i.test(name)) videoSel.appendChild(opt());
-      if (/\.(vtt|srt)$/i.test(name)) { sub1Sel.appendChild(opt()); sub2Sel.appendChild(opt()); }
-    });
-  }
-
-  const uploadStatus = document.getElementById("uploadStatus");
-  async function uploadFile(file) {
-    uploadStatus.textContent = `Uploading ${file.name}...`;
-    const res = await fetch("/upload?name=" + encodeURIComponent(file.name), { method: "POST", body: file });
-    const data = await res.json();
-    if (!data.ok) {
-      uploadStatus.style.color = "#f88";
-      uploadStatus.textContent = "Upload failed: " + data.error;
-      return null;
+    for (const kind of ["video", "sub1", "sub2"]) {
+      if (data[kind]) {
+        pickedPaths[kind] = data[kind];
+        pickedNames[kind] = data[kind].split(/[\\/]/).pop();
+        pickedEls[kind].textContent = pickedNames[kind];
+      }
     }
-    uploadStatus.style.color = "#9f9";
-    uploadStatus.textContent = `Uploaded ${data.name}`;
-    await loadFileList();
-    return data.name;
+    await loadSubAdjustments();
+    applySelection();
   }
 
-  document.getElementById("videoFile").addEventListener("change", async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const name = await uploadFile(file);
-    if (name) { videoSel.value = name; applySelection(); }
-  });
-  document.getElementById("sub1File").addEventListener("change", async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const name = await uploadFile(file);
-    if (name) { sub1Sel.value = name; applySelection(); }
-  });
-  document.getElementById("sub2File").addEventListener("change", async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const name = await uploadFile(file);
-    if (name) { sub2Sel.value = name; applySelection(); }
+  document.querySelectorAll("button[data-kind]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const kind = btn.dataset.kind;
+      pickedEls[kind].textContent = "Waiting for file dialog...";
+      const res = await fetch("/pick?kind=" + kind);
+      const data = await res.json();
+      if (data.ok) {
+        pickedPaths[kind] = data.path;
+        pickedNames[kind] = data.name;
+        pickedEls[kind].textContent = data.name;
+        if (kind === "sub1" || kind === "sub2") await loadSubAdjustments();
+        applySelection();
+      } else {
+        pickedEls[kind].textContent = pickedNames[kind] || "(none)";
+      }
+    });
   });
 
   async function applySelection() {
-    if (videoSel.value) player.src = "/" + encodeURIComponent(videoSel.value);
-    cues1 = await fetchCues(sub1Sel.value ? "/" + encodeURIComponent(sub1Sel.value) : null);
-    cues2 = await fetchCues(sub2Sel.value ? "/" + encodeURIComponent(sub2Sel.value) : null);
+    if (pickedNames.video) player.src = "/play?which=video";
+    cues1 = await fetchCues(pickedNames.sub1 ? "/play?which=sub1" : null);
+    cues2 = await fetchCues(pickedNames.sub2 ? "/play?which=sub2" : null);
   }
 
-  videoSel.addEventListener("change", applySelection);
-  sub1Sel.addEventListener("change", applySelection);
-  sub2Sel.addEventListener("change", applySelection);
-
   player.addEventListener("timeupdate", () => {
-    el1.textContent = cueTextAt(cues1, player.currentTime);
-    el2.textContent = cueTextAt(cues2, player.currentTime);
+    el1.textContent = cueTextAt(cues1, (player.currentTime - subAdjust.sub1.offset) * subAdjust.sub1.speed);
+    el2.textContent = cueTextAt(cues2, (player.currentTime - subAdjust.sub2.offset) * subAdjust.sub2.speed);
   });
 
-  loadFileList();
+  loadSelection();
+
+  // Per-file subtitle delay/speed: remembered server-side keyed by the
+  // subtitle's absolute path, so picking the same file again later
+  // auto-restores whatever correction was tuned in for it.
+  const delaySub1 = document.getElementById("delaySub1"), delaySub1Val = document.getElementById("delaySub1Val");
+  const speedSub1 = document.getElementById("speedSub1"), speedSub1Val = document.getElementById("speedSub1Val");
+  const delaySub2 = document.getElementById("delaySub2"), delaySub2Val = document.getElementById("delaySub2Val");
+  const speedSub2 = document.getElementById("speedSub2"), speedSub2Val = document.getElementById("speedSub2Val");
+  const adjustStatus = document.getElementById("adjustStatus");
+
+  async function loadSubAdjustments() {
+    for (const kind of ["sub1", "sub2"]) {
+      if (!pickedPaths[kind]) { subAdjust[kind] = { offset: 0, speed: 1 }; continue; }
+      const res = await fetch("/sub_adjustment?path=" + encodeURIComponent(pickedPaths[kind]));
+      subAdjust[kind] = await res.json();
+    }
+    delaySub1.value = subAdjust.sub1.offset; speedSub1.value = subAdjust.sub1.speed;
+    delaySub2.value = subAdjust.sub2.offset; speedSub2.value = subAdjust.sub2.speed;
+    updateAdjustLabels();
+  }
+
+  function updateAdjustLabels() {
+    delaySub1Val.textContent = parseFloat(delaySub1.value).toFixed(1) + "s";
+    speedSub1Val.textContent = parseFloat(speedSub1.value).toFixed(3) + "x";
+    delaySub2Val.textContent = parseFloat(delaySub2.value).toFixed(1) + "s";
+    speedSub2Val.textContent = parseFloat(speedSub2.value).toFixed(3) + "x";
+  }
+
+  let saveAdjustTimer = null;
+  function onAdjustInput(kind) {
+    subAdjust[kind] = {
+      offset: parseFloat(kind === "sub1" ? delaySub1.value : delaySub2.value),
+      speed: parseFloat(kind === "sub1" ? speedSub1.value : speedSub2.value)
+    };
+    updateAdjustLabels();
+    if (!pickedPaths[kind]) return;
+    adjustStatus.textContent = "Saving...";
+    clearTimeout(saveAdjustTimer);
+    saveAdjustTimer = setTimeout(async () => {
+      await fetch("/sub_adjustment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: pickedPaths[kind], ...subAdjust[kind] })
+      });
+      adjustStatus.textContent = "Saved for " + pickedNames[kind];
+    }, 400);
+  }
+  delaySub1.addEventListener("input", () => onAdjustInput("sub1"));
+  speedSub1.addEventListener("input", () => onAdjustInput("sub1"));
+  delaySub2.addEventListener("input", () => onAdjustInput("sub2"));
+  speedSub2.addEventListener("input", () => onAdjustInput("sub2"));
 
   const root = document.documentElement.style;
   const tuneFont = document.getElementById("tuneFont");

@@ -18,7 +18,7 @@ On Error Goto 0
 ' windowStyle 0 below -- pythonw.exe detaches them entirely, which crashes
 ' every request because http.server tries to log errors to a null stderr.
 ' 0 = hidden window, False = don't wait for it to finish
-shell.Run "python.exe """ & scriptDir & "\local_server.py"" """ & scriptDir & "\media"" 8899", 0, False
+shell.Run "python.exe """ & scriptDir & "\local_server.py"" 8899", 0, False
 
 ' Give the server a moment to bind the port before opening the browser
 WScript.Sleep 1500

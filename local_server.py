@@ -1,11 +1,12 @@
 """Local media server with HTTP Range support, required for Chromecast seeking.
 
 Usage:
-    python local_server.py [media_dir] [port]
+    python local_server.py [port]
 
-Put your video file and two subtitle files (.vtt) into media_dir (default: ./media).
-The server also exposes GET /list.json with the file listing, used by the
-Chrome extension popup to build the picker.
+No files are copied anywhere. "Choose Video/Subtitle" in the sender page opens
+a native file picker (running here on the server, so it can browse the whole
+disk); the chosen absolute path is remembered in selection.json next to this
+script, and /play streams directly from that path.
 
 Run this on the same machine as Chrome. It binds to 0.0.0.0 so the Chromecast
 device on your LAN can fetch the files directly.
@@ -20,20 +21,72 @@ import subprocess
 import sys
 import urllib.parse
 
-MEDIA_DIR = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "media")
-PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8787
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8787
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 RECEIVER_DIR = os.path.join(APP_DIR, "receiver")
-
-os.makedirs(MEDIA_DIR, exist_ok=True)
+SELECTION_FILE = os.path.join(APP_DIR, "selection.json")
 
 RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
 
+FILE_TYPES = {
+    "video": [("Video files", "*.mp4 *.mkv *.webm *.mov *.avi *.wmv"), ("All files", "*.*")],
+    "sub1": [("Subtitle files", "*.srt *.vtt"), ("All files", "*.*")],
+    "sub2": [("Subtitle files", "*.srt *.vtt"), ("All files", "*.*")],
+}
 
-class RangeRequestHandler(http.server.SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=MEDIA_DIR, **kwargs)
 
+def load_selection():
+    try:
+        with open(SELECTION_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {"video": None, "sub1": None, "sub2": None}
+
+
+def save_selection(selection):
+    with open(SELECTION_FILE, "w", encoding="utf-8") as f:
+        json.dump(selection, f)
+
+
+SELECTION = load_selection()
+
+SUB_ADJUST_FILE = os.path.join(APP_DIR, "sub_adjustments.json")
+
+
+def load_sub_adjustments():
+    try:
+        with open(SUB_ADJUST_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_sub_adjustments(adjustments):
+    with open(SUB_ADJUST_FILE, "w", encoding="utf-8") as f:
+        json.dump(adjustments, f)
+
+
+# Keyed by absolute subtitle path -> {"offset": seconds, "speed": multiplier}.
+# Lets a per-file delay/speed correction (tuned once in preview.html) get
+# remembered and re-applied automatically next time that same file is picked.
+SUB_ADJUSTMENTS = load_sub_adjustments()
+
+
+def pick_file(kind):
+    """Open a native file-picker dialog on the server machine and return the
+    chosen absolute path, or None if the user cancelled."""
+    import tkinter
+    from tkinter import filedialog
+
+    root = tkinter.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    path = filedialog.askopenfilename(title=f"Choose {kind}", filetypes=FILE_TYPES.get(kind, [("All files", "*.*")]))
+    root.destroy()
+    return path or None
+
+
+class RangeRequestHandler(http.server.BaseHTTPRequestHandler):
     def end_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Accept-Ranges", "bytes")
@@ -41,11 +94,20 @@ class RangeRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path == "/list.json":
-            self.send_list_json()
-            return
         if parsed.path == "/whoami":
             self.send_whoami()
+            return
+        if parsed.path == "/selection":
+            self.send_json(200, SELECTION)
+            return
+        if parsed.path == "/pick":
+            self.handle_pick(parsed)
+            return
+        if parsed.path == "/play":
+            self.handle_play(parsed)
+            return
+        if parsed.path == "/sub_adjustment":
+            self.handle_get_sub_adjustment(parsed)
             return
         if parsed.path in ("/", "/sender.html"):
             self.serve_app_file("sender.html")
@@ -53,47 +115,65 @@ class RangeRequestHandler(http.server.SimpleHTTPRequestHandler):
         if parsed.path == "/preview.html":
             self.serve_app_file("preview.html")
             return
-        self.serve_with_range()
+        self.send_error(404, "Not found")
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/apply_style":
             self.handle_apply_style()
             return
-        if parsed.path == "/upload":
-            self.handle_upload(parsed)
+        if parsed.path == "/sub_adjustment":
+            self.handle_set_sub_adjustment()
             return
         self.send_error(404, "Not found")
 
-    def handle_upload(self, parsed):
+    def handle_pick(self, parsed):
         query = urllib.parse.parse_qs(parsed.query)
-        names = query.get("name")
-        if not names or not names[0]:
-            self.send_json(400, {"ok": False, "error": "missing ?name= query param"})
-            return
-        # basename() strips any directory components so the upload can't escape MEDIA_DIR
-        filename = os.path.basename(names[0])
-        if not filename:
-            self.send_json(400, {"ok": False, "error": "invalid filename"})
+        kind = (query.get("kind") or [""])[0]
+        if kind not in ("video", "sub1", "sub2"):
+            self.send_json(400, {"ok": False, "error": "kind must be video, sub1, or sub2"})
             return
 
-        length = int(self.headers.get("Content-Length", "0"))
-        dest_path = os.path.join(MEDIA_DIR, filename)
+        path = pick_file(kind)
+        if not path:
+            self.send_json(200, {"ok": False, "error": "cancelled"})
+            return
+
+        SELECTION[kind] = path
+        save_selection(SELECTION)
+        self.send_json(200, {"ok": True, "path": path, "name": os.path.basename(path)})
+
+    def handle_play(self, parsed):
+        query = urllib.parse.parse_qs(parsed.query)
+        which = (query.get("which") or [""])[0]
+        path = SELECTION.get(which)
+        if not path or not os.path.isfile(path):
+            self.send_error(404, "No file selected for this role, or it no longer exists")
+            return
+        self.serve_with_range(path)
+
+    def handle_get_sub_adjustment(self, parsed):
+        query = urllib.parse.parse_qs(parsed.query)
+        path = (query.get("path") or [""])[0]
+        adj = SUB_ADJUSTMENTS.get(path, {"offset": 0, "speed": 1})
+        self.send_json(200, adj)
+
+    def handle_set_sub_adjustment(self):
         try:
-            with open(dest_path, "wb") as f:
-                remaining = length
-                chunk_size = 64 * 1024
-                while remaining > 0:
-                    chunk = self.rfile.read(min(chunk_size, remaining))
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    remaining -= len(chunk)
-        except OSError as e:
-            self.send_json(500, {"ok": False, "error": str(e)})
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length) or b"{}")
+            path = payload["path"]
+            offset = float(payload["offset"])
+            speed = float(payload["speed"])
+            if not path or not (0.1 <= speed <= 3):
+                raise ValueError("invalid path or speed out of range")
+        except (KeyError, ValueError, TypeError, json.JSONDecodeError) as e:
+            self.send_json(400, {"ok": False, "error": f"invalid payload: {e}"})
             return
 
-        self.send_json(200, {"ok": True, "name": filename})
+        SUB_ADJUSTMENTS[path] = {"offset": offset, "speed": speed}
+        save_sub_adjustments(SUB_ADJUSTMENTS)
+        self.send_json(200, {"ok": True})
 
     def handle_apply_style(self):
         try:
@@ -162,24 +242,7 @@ class RangeRequestHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def send_list_json(self):
-        files = sorted(
-            f for f in os.listdir(MEDIA_DIR)
-            if os.path.isfile(os.path.join(MEDIA_DIR, f))
-        )
-        body = json.dumps({"files": files}).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def serve_with_range(self):
-        path = self.translate_path(self.path)
-        if not os.path.isfile(path):
-            self.send_error(404, "File not found")
-            return
-
+    def serve_with_range(self, path):
         file_size = os.path.getsize(path)
         range_header = self.headers.get("Range")
         content_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
@@ -239,7 +302,6 @@ def lan_ip():
 
 if __name__ == "__main__":
     ip = lan_ip()
-    print(f"Serving {MEDIA_DIR}")
     print(f"Local:  http://127.0.0.1:{PORT}/")
     print(f"LAN (use this from the sender page / extension): http://{ip}:{PORT}/")
     http.server.ThreadingHTTPServer(("0.0.0.0", PORT), RangeRequestHandler).serve_forever()
