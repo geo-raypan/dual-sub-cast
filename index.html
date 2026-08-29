@@ -243,6 +243,10 @@
   const el1 = document.getElementById("sub1");
   const el2 = document.getElementById("sub2");
 
+  function escapeHtml(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
   function parseVtt(text) {
     const cues = [];
     const blocks = text.replace(/\r/g, "").split(/\n\n+/);
@@ -256,45 +260,114 @@
       const start = toSec(m[1] ? m[1].replace(":", "") : null, m[2], m[3], m[4]);
       const end = toSec(m[5] ? m[5].replace(":", "") : null, m[6], m[7], m[8]);
       const text = lines.slice(timeLineIdx + 1).join("\n").replace(/<[^>]+>/g, "");
-      cues.push({ start, end, text });
+      cues.push({ start, end, html: escapeHtml(text).replace(/\n/g, "<br>") });
     }
     return cues;
   }
 
-  // Advanced SubStation Alpha / SubStation Alpha: completely different from
-  // SRT/VTT -- centisecond timestamps, a Dialogue: line per cue whose field
-  // order comes from the preceding Format: line, and inline {\...} style
-  // override tags plus literal "\N"/"\h" escapes instead of real newlines/spaces.
-  function parseAss(text) {
-    const cues = [];
-    const lines = text.replace(/\r/g, "").split("\n");
-    let inEvents = false;
-    let textIdx = 9; // standard Events order: ...,Effect,Text (index 9 of 10 fields)
-    const timeRe = /(\d+):(\d{2}):(\d{2})\.(\d{2})/;
-    for (const line of lines) {
-      if (/^\[Events\]/i.test(line)) { inEvents = true; continue; }
-      if (/^\[/.test(line)) { inEvents = false; continue; }
-      if (!inEvents) continue;
-      if (/^Format:/i.test(line)) {
-        const fields = line.slice(line.indexOf(":") + 1).split(",").map(s => s.trim().toLowerCase());
-        const idx = fields.indexOf("text");
-        if (idx !== -1) textIdx = idx;
+  // &HAABBGGRR (ASS's own hex color order, alpha inverted: 00=opaque) -> CSS rgba().
+  function parseAssColor(hex) {
+    if (!hex) return null;
+    let h = hex.replace(/^&H/i, "").replace(/&$/, "").padStart(8, "0").slice(-8);
+    const aa = parseInt(h.slice(0, 2), 16), bb = parseInt(h.slice(2, 4), 16);
+    const gg = parseInt(h.slice(4, 6), 16), rr = parseInt(h.slice(6, 8), 16);
+    return `rgba(${rr},${gg},${bb},${(1 - aa / 255).toFixed(2)})`;
+  }
+
+  // Applies a Style's color/bold/italic/underline, then walks inline {\...}
+  // override tags to update those same four properties as they change
+  // mid-line. Positioning, karaoke, drawing commands, and other ASS effects
+  // are intentionally not supported -- this covers the common fansub case of
+  // color-coding speakers or italicizing off-screen dialogue, not full typesetting.
+  function assTextToHtml(raw, baseStyle) {
+    let bold = !!(baseStyle && baseStyle.bold);
+    let italic = !!(baseStyle && baseStyle.italic);
+    let underline = !!(baseStyle && baseStyle.underline);
+    let color = baseStyle && baseStyle.color;
+    let html = "";
+    for (const token of raw.split(/(\{[^}]*\})/g)) {
+      if (!token) continue;
+      if (token[0] === "{" && token[token.length - 1] === "}") {
+        const tags = token.slice(1, -1).match(/\\(?:1?c&H[0-9a-fA-F]+&?|b\d|i\d|u\d)/gi) || [];
+        for (const tag of tags) {
+          if (/^\\1?c&H/i.test(tag)) color = parseAssColor(tag.replace(/^\\1?c/i, ""));
+          else if (/^\\b/i.test(tag)) bold = tag.slice(2) !== "0";
+          else if (/^\\i/i.test(tag)) italic = tag.slice(2) !== "0";
+          else if (/^\\u/i.test(tag)) underline = tag.slice(2) !== "0";
+        }
         continue;
       }
-      if (!/^Dialogue:/i.test(line)) continue;
-      const parts = line.slice(line.indexOf(":") + 1).split(",");
-      if (parts.length <= textIdx) continue;
-      const sm = (parts[1] || "").trim().match(timeRe);
-      const em = (parts[2] || "").trim().match(timeRe);
-      if (!sm || !em) continue;
-      const toSec = m => parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseInt(m[3]) + parseInt(m[4]) * 10 / 1000;
-      const start = toSec(sm), end = toSec(em);
-      const text = parts.slice(textIdx).join(",")
-        .replace(/\{[^}]*\}/g, "")
-        .replace(/\\N/gi, "\n")
-        .replace(/\\h/g, " ")
-        .trim();
-      cues.push({ start, end, text });
+      const text = escapeHtml(token).replace(/\\N/gi, "<br>").replace(/\\h/g, "&nbsp;");
+      const decl = [];
+      if (color) decl.push("color:" + color);
+      if (bold) decl.push("font-weight:bold");
+      if (italic) decl.push("font-style:italic");
+      if (underline) decl.push("text-decoration:underline");
+      html += decl.length ? `<span style="${decl.join(";")}">${text}</span>` : text;
+    }
+    return html.trim();
+  }
+
+  const ASS_EVENT_FIELDS_DEFAULT = ["layer", "start", "end", "style", "name", "marginl", "marginr", "marginv", "effect", "text"];
+  const ASS_STYLE_FIELDS_DEFAULT = ["name", "fontname", "fontsize", "primarycolour", "secondarycolour", "outlinecolour", "backcolour", "bold", "italic", "underline"];
+
+  // Advanced SubStation Alpha / SubStation Alpha: completely different from
+  // SRT/VTT -- centisecond timestamps, a [V4+ Styles] section assigning
+  // color/bold/italic/underline per named style, and a Dialogue: line per
+  // cue (field order from the preceding Format: line) referencing one of
+  // those styles plus its own inline {\...} overrides.
+  function parseAss(text) {
+    const cues = [];
+    const styles = {};
+    const lines = text.replace(/\r/g, "").split("\n");
+    let section = null;
+    let eventFields = ASS_EVENT_FIELDS_DEFAULT;
+    let styleFields = ASS_STYLE_FIELDS_DEFAULT;
+    const timeRe = /(\d+):(\d{2}):(\d{2})\.(\d{2})/;
+
+    for (const line of lines) {
+      if (/^\[V4\+?\s*Styles\]/i.test(line)) { section = "styles"; continue; }
+      if (/^\[Events\]/i.test(line)) { section = "events"; continue; }
+      if (/^\[/.test(line)) { section = null; continue; }
+
+      if (section === "styles") {
+        if (/^Format:/i.test(line)) {
+          styleFields = line.slice(line.indexOf(":") + 1).split(",").map(s => s.trim().toLowerCase());
+          continue;
+        }
+        if (!/^Style:/i.test(line)) continue;
+        const parts = line.slice(line.indexOf(":") + 1).split(",").map(s => s.trim());
+        const get = name => { const i = styleFields.indexOf(name); return i !== -1 ? parts[i] : undefined; };
+        const name = get("name");
+        if (!name) continue;
+        styles[name] = {
+          color: parseAssColor(get("primarycolour")),
+          bold: get("bold") === "-1" || get("bold") === "1",
+          italic: get("italic") === "-1" || get("italic") === "1",
+          underline: get("underline") === "-1" || get("underline") === "1"
+        };
+        continue;
+      }
+
+      if (section === "events") {
+        if (/^Format:/i.test(line)) {
+          eventFields = line.slice(line.indexOf(":") + 1).split(",").map(s => s.trim().toLowerCase());
+          continue;
+        }
+        if (!/^Dialogue:/i.test(line)) continue;
+        const parts = line.slice(line.indexOf(":") + 1).split(",");
+        const startIdx = eventFields.indexOf("start"), endIdx = eventFields.indexOf("end");
+        const styleIdx = eventFields.indexOf("style"), textIdx = eventFields.indexOf("text");
+        if (startIdx === -1 || endIdx === -1 || textIdx === -1 || parts.length <= textIdx) continue;
+        const sm = (parts[startIdx] || "").trim().match(timeRe);
+        const em = (parts[endIdx] || "").trim().match(timeRe);
+        if (!sm || !em) continue;
+        const toSec = m => parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseInt(m[3]) + parseInt(m[4]) * 10 / 1000;
+        const start = toSec(sm), end = toSec(em);
+        const styleName = styleIdx !== -1 ? parts[styleIdx].trim() : "";
+        const rawText = parts.slice(textIdx).join(",");
+        cues.push({ start, end, html: assTextToHtml(rawText, styles[styleName]) });
+      }
     }
     return cues;
   }
@@ -312,7 +385,7 @@
       const toSec = (h, mi, s, ms) => parseInt(h) * 3600 + parseInt(mi) * 60 + parseInt(s) + parseInt(ms) / 1000;
       const start = toSec(m[1], m[2], m[3], m[4]);
       const end = toSec(m[5], m[6], m[7], m[8]);
-      cues.push({ start, end, text: lines.slice(1).join("\n") });
+      cues.push({ start, end, html: escapeHtml(lines.slice(1).join("\n")).replace(/\n/g, "<br>") });
     }
     return cues;
   }
@@ -331,9 +404,9 @@
     return parseSubtitle(await res.text());
   }
 
-  function cueTextAt(cues, t) {
+  function cueHtmlAt(cues, t) {
     const hit = cues.find(c => t >= c.start && t <= c.end);
-    return hit ? hit.text : "";
+    return hit ? hit.html : "";
   }
 
   function setPickedLabel(kind, text, isSet) {
@@ -431,8 +504,8 @@
   }
 
   player.addEventListener("timeupdate", () => {
-    el1.textContent = cueTextAt(cues1, player.currentTime - subAdjust.sub1.offset);
-    el2.textContent = cueTextAt(cues2, player.currentTime - subAdjust.sub2.offset);
+    el1.innerHTML = cueHtmlAt(cues1, player.currentTime - subAdjust.sub1.offset);
+    el2.innerHTML = cueHtmlAt(cues2, player.currentTime - subAdjust.sub2.offset);
   });
 
   // Left/Right arrow keys seek the local preview by 5s, as long as focus
