@@ -398,10 +398,31 @@
     return parseVtt(text);
   }
 
+  // Subtitle files aren't reliably UTF-8 -- Chinese fansub .ass/.srt in
+  // particular are often saved as Big5 or GBK by older editing tools. Decoding
+  // those as UTF-8 doesn't just mangle the Chinese text, it can corrupt the
+  // ASCII structure keywords (Dialogue:, -->, [Events]) too, since multi-byte
+  // sequences get split wrong, so nothing parses at all. BOM decides it when
+  // present; otherwise try encodings in order and keep the first one that
+  // doesn't produce replacement characters.
+  function decodeSubtitleBytes(buffer) {
+    const bytes = new Uint8Array(buffer);
+    if (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) return new TextDecoder("utf-8").decode(bytes.subarray(3));
+    if (bytes[0] === 0xFF && bytes[1] === 0xFE) return new TextDecoder("utf-16le").decode(bytes.subarray(2));
+    if (bytes[0] === 0xFE && bytes[1] === 0xFF) return new TextDecoder("utf-16be").decode(bytes.subarray(2));
+    for (const enc of ["utf-8", "big5", "gbk"]) {
+      try {
+        const decoded = new TextDecoder(enc, { fatal: false }).decode(bytes);
+        if (!decoded.includes("�")) return decoded;
+      } catch (e) { /* encoding label unsupported here -- try the next one */ }
+    }
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  }
+
   async function fetchCues(url) {
     if (!url) return [];
     const res = await fetch(url);
-    return parseSubtitle(await res.text());
+    return parseSubtitle(decodeSubtitleBytes(await res.arrayBuffer()));
   }
 
   function cueHtmlAt(cues, t) {
